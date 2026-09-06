@@ -21,6 +21,22 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("computer: browser selector misclassified as URL", "mcp.py",
+     '        looks_urlish = ((str(k).lower() in _URL_KEYS and not selector_target)',
+     '        looks_urlish = ((str(k).lower() in _URL_KEYS)',
+     "test_computeruse.py", "browser click selectors must reach the guarded server"),
+    ("computer: extra artifacts ignored", "computeruse.py",
+     '    if names != {r["file"] for r in rows}:',
+     '    if False:',
+     "test_computeruse.py", "extra and duplicate output must refuse"),
+    ("computer: corrupt bytes accepted", "computeruse.py",
+     '        if len(data) != row["bytes"] or hashlib.sha256(data).hexdigest() != row["sha256"]:',
+     '        if len(data) != row["bytes"]:',
+     "test_computeruse.py", "same-length content corruption must refuse"),
+    ("computer: expected manifest can change", "computeruse.py",
+     '    if digest_manifest(manifest) != expected_digest:',
+     '    if False:',
+     "test_computeruse.py", "an altered expected manifest must refuse"),
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',

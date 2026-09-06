@@ -1,16 +1,21 @@
 # Expert Fleet
 
+> This branch is a bounded computer-use development candidate. The independent
+> synthetic invoice verifier does not establish browser authority, atomic target
+> checks, general-purpose computer reliability or release readiness. See
+> [the phase contract](docs/DESIGN-bounded-computer-use.md).
+
 **A file-backed, stdlib-only platform for building expert AI agents that work
 continuously, prove what they did, and remember what they learned.**
 
 [![tests](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
-![tests](https://img.shields.io/badge/tests-155%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-52%20registered-blue)
+![tests](https://img.shields.io/badge/tests-156%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-56%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
-118 Python modules · 155 registered acceptance tests · one HTML control panel · no
+119 Python modules · 156 registered acceptance tests · one HTML control panel · no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 ```bash
@@ -162,7 +167,7 @@ are laws with tests that would fail, not features with descriptions.**
 | Long context | a bigger window | **recursive sub-calls** (the RLM result, MIT 2025): the material never enters the window — slices go to disposable sub-calls on the cheapest rail, only distilled answers return, metered and contained like every call |
 | New tools | a fixed integration catalogue, or an agent that installs what it likes | **the capability frontier**: an agent may PROPOSE a tool it lacks, never author the test — it declares an import or a binary, the *platform* generates the probe, and the probe must FAIL before anything is installed. Readiness is decided by a seal outside the agent's reach, and a human adopts it from a terminal |
 | Knowing what a goal needs | a prompt asking the model to list its tools | two measured corpora, 50 goals across 40+ trades, pinned as tests. The broad set went **24% → 100%** honest coverage; the adversarial set found that **5 goals carrying irreversible physical or financial effects did not stop for the owner** — cutting power to a heater, changing a CNC feed rate, filing a claim in your name — because every authority rule was about a digital permission and none about a machine that moves. Now 0 |
-| Dependencies | large stacks | Python stdlib. Zero. 155 registered tests; six CI configurations |
+| Dependencies | large stacks | Python stdlib. Zero. 156 registered tests; six CI configurations |
 | Your state | often hosted, often theirs | files you own, provider-universal (any key, or a zero-key local model) — the model is a swappable part; the memory, graders, runbooks and ledgers are the asset |
 
 Four shipped archetypes cover the famous products' ground on this
@@ -588,7 +593,7 @@ build is cleared.** The full table is in
 
 ```bash
 python demo.py            # the whole platform, keyless, in one run
-python tests/run_all.py   # 155 registered acceptance tests
+python tests/run_all.py   # 156 registered acceptance tests
 python proof.py           # what is proven, and to what level
 python evidence.py        # why we believe it, and where belief runs out
 python metrics.py         # is it working — and the numbers it refuses to invent

@@ -339,7 +339,7 @@ _URL_KEYS = ("url", "uri", "href", "link", "src", "endpoint", "address",
              "target", "page", "location")
 
 
-def _bad_url_argument(arguments, root=None, _depth=0):
+def _bad_url_argument(arguments, root=None, _depth=0, tool=None):
     """The refusal text if any argument points somewhere it must not, else "".
 
     Reuses ingest.py's guards rather than writing a second pair that can
@@ -369,7 +369,9 @@ def _bad_url_argument(arguments, root=None, _depth=0):
             continue
         if not isinstance(v, str) or not v.strip():
             continue
-        looks_urlish = (str(k).lower() in _URL_KEYS
+        selector_target = (_depth == 0 and tool == "browser_click" and k == "target"
+                           and not re.match(r"^[a-z][a-z0-9+.-]*:|^//", v.strip(), re.I))
+        looks_urlish = ((str(k).lower() in _URL_KEYS and not selector_target)
                         or re.match(r"^[a-z][a-z0-9+.-]*://", v.strip(), re.I))
         if not looks_urlish:
             continue
@@ -419,7 +421,7 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
     # `browser_control` is a promoted capability, so `browser_navigate` with
     # a file:// or link-local URL is a live path to the same incident this
     # repository has already had once, on a rail with no checks at all.
-    bad = _bad_url_argument(arguments, root or os.environ.get("AGENT_ROOT"))
+    bad = _bad_url_argument(arguments, root or os.environ.get("AGENT_ROOT"), tool=tool)
     if bad:
         return {"isError": True, "content": [{"type": "text", "text": bad}]}, "denied"
     root = root or os.environ.get("AGENT_ROOT") or os.getcwd()
