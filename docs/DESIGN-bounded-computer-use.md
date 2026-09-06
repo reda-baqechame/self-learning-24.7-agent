@@ -17,6 +17,16 @@ browser's action authority, observation freshness or session identity. Those
 are separate adapter gates. A DOM self-report is not an authenticated browser
 observation. Independent destination and effect verification remain mandatory.
 
+The next adapter checkpoint seals normalized page/target observations with an
+authority-private HMAC and a per-process session identity. Only the latest
+bounded-age receipt may authorize an action. Each authorization is consumed
+before the trusted atomic adapter runs, so an unknown outcome cannot retry.
+Target identity, text, URL and geometry, page URL, allowed origin and deadline
+are supplied as adapter preconditions. Adapter precondition refusal means no
+action; an exception or malformed readback is unresolved. This contract does
+not make a generic MCP evaluator safe and does not prove an adapter enforced
+the preconditions until an integrated runtime test exercises it.
+
 ## Trial boundary
 
 Use the platform mcp.guarded_call path and pinned isolated Chromium image, no

@@ -6,10 +6,16 @@ does not drive a browser, and cannot establish session or observation freshness.
 See docs/DESIGN-bounded-computer-use.md.
 """
 import hashlib
+import hmac
 import json
+import math
 import os
 import re
+import secrets
 import stat
+import threading
+import time
+from urllib.parse import urlsplit
 
 import fileauth
 
@@ -19,6 +25,167 @@ MAX_BYTES = 10_000_000
 
 class Refused(ValueError):
     pass
+
+
+class Unresolved(RuntimeError):
+    """An action may have happened, so automatic retry is unsafe."""
+
+
+def _canonical(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def _origin(value, configured=False):
+    if not isinstance(value, str) or len(value) > 2048:
+        raise Refused("invalid browser URL")
+    p = urlsplit(value)
+    if p.scheme not in ("http", "https") or not p.hostname or p.username or p.password:
+        raise Refused("browser URL must be an uncredentialed HTTP origin")
+    if configured and (p.path not in ("", "/") or p.query or p.fragment):
+        raise Refused("allowed browser origin cannot include a path, query or fragment")
+    try:
+        port = p.port
+    except ValueError as error:
+        raise Refused("invalid browser URL port") from error
+    host = p.hostname.lower()
+    if ":" in host:
+        host = "[" + host + "]"
+    default = (p.scheme == "http" and port in (None, 80)) or (p.scheme == "https" and port in (None, 443))
+    return f"{p.scheme}://{host}" + ("" if default else f":{port}")
+
+
+class BrowserAuthority:
+    """Seal one-session observations and authorize one-use atomic adapter calls.
+
+    This is an authority contract, not a browser implementation. The supplied
+    adapter must enforce every precondition and return its receipt from the same
+    serialized browser context. An exception is unresolved and consumes the
+    authorization, because the click may already have happened.
+    """
+
+    def __init__(self, allowed_origin, session_id=None, clock=None, max_age=5.0):
+        self.allowed_origin = _origin(allowed_origin, configured=True)
+        self.session_id = session_id or secrets.token_hex(16)
+        if not isinstance(self.session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", self.session_id):
+            raise Refused("invalid browser session identity")
+        if isinstance(max_age, bool) or not isinstance(max_age, (int, float)) or not 0 < max_age <= 60:
+            raise Refused("invalid observation lifetime")
+        self.max_age = float(max_age)
+        self.clock = clock or time.monotonic
+        self._key = secrets.token_bytes(32)
+        self._revision = 0
+        self._consumed = set()
+        self._lock = threading.RLock()
+
+    def _state(self, state):
+        if not isinstance(state, dict) or set(state) != {"url", "title", "dialog", "expired", "links"}:
+            raise Refused("invalid browser observation shape")
+        if not isinstance(state["title"], str) or len(state["title"]) > 500:
+            raise Refused("invalid browser title")
+        if type(state["dialog"]) is not bool or type(state["expired"]) is not bool:
+            raise Refused("invalid browser blocking state")
+        if state["dialog"] or state["expired"]:
+            raise Refused("browser action blocked by dialog or authentication state")
+        if _origin(state["url"]) != self.allowed_origin:
+            raise Refused("page is outside the allowed browser origin")
+        links = state["links"]
+        if not isinstance(links, list) or not 1 <= len(links) <= MAX_INVOICES:
+            raise Refused("browser observation has no bounded targets")
+        ids = set()
+        for link in links:
+            if not isinstance(link, dict) or set(link) != {"id", "href", "text", "box"}:
+                raise Refused("invalid browser target shape")
+            identity = link["id"]
+            if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity):
+                raise Refused("invalid browser target identity")
+            if identity in ids:
+                raise Refused("ambiguous browser target identity")
+            ids.add(identity)
+            if not isinstance(link["text"], str) or not link["text"] or len(link["text"]) > 500:
+                raise Refused("invalid browser target text")
+            box = link["box"]
+            if (not isinstance(box, dict) or set(box) != {"x", "y", "width", "height"}
+                    or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                           or not math.isfinite(v) or abs(v) > 10_000_000 for v in box.values())
+                    or box["width"] <= 0 or box["height"] <= 0):
+                raise Refused("invalid browser target geometry")
+            if _origin(link["href"]) != self.allowed_origin:
+                raise Refused("browser target leaves the allowed origin")
+        return json.loads(_canonical(state).decode("utf-8"))
+
+    def _mac(self, body):
+        return hmac.new(self._key, _canonical(body), hashlib.sha256).hexdigest()
+
+    def observe(self, state):
+        with self._lock:
+            clean = self._state(state)
+            self._revision += 1
+            body = {"session": self.session_id, "revision": self._revision,
+                    "observed_at": float(self.clock()),
+                    "state_sha256": hashlib.sha256(_canonical(clean)).hexdigest(),
+                    "state": clean}
+            return dict(body, mac=self._mac(body))
+
+    def _verified(self, receipt, deadline):
+        if not isinstance(receipt, dict) or set(receipt) != {
+                "session", "revision", "observed_at", "state_sha256", "state", "mac"}:
+            raise Refused("invalid browser receipt shape")
+        body = {k: receipt[k] for k in receipt if k != "mac"}
+        if not isinstance(receipt["mac"], str) or not hmac.compare_digest(self._mac(body), receipt["mac"]):
+            raise Refused("browser receipt signature differs")
+        if receipt["session"] != self.session_id or receipt["revision"] != self._revision:
+            raise Refused("browser receipt is stale or belongs to another session")
+        now = float(self.clock())
+        observed = receipt["observed_at"]
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            raise Refused("invalid browser action deadline")
+        if not isinstance(observed, (int, float)) or now < observed or now - observed > self.max_age:
+            raise Refused("browser observation is stale")
+        if deadline < now or deadline > observed + self.max_age:
+            raise Refused("browser action deadline is expired or exceeds observation lifetime")
+        clean = self._state(receipt["state"])
+        digest = hashlib.sha256(_canonical(clean)).hexdigest()
+        if digest != receipt["state_sha256"]:
+            raise Refused("browser observation digest differs")
+        return clean, digest
+
+    def execute_click(self, receipt, target_id, deadline, atomic_adapter):
+        """Execute once; adapter failure or malformed readback is unresolved."""
+        with self._lock:
+            state, digest = self._verified(receipt, deadline)
+            if receipt["mac"] in self._consumed:
+                raise Refused("browser action authorization was already consumed")
+            targets = [x for x in state["links"] if x["id"] == target_id]
+            if len(targets) != 1:
+                raise Refused("browser action target is absent or ambiguous")
+            preconditions = {"session": self.session_id,
+                "revision": receipt["revision"], "state_sha256": digest,
+                "page_url": state["url"], "target": targets[0],
+                "allowed_origin": self.allowed_origin, "deadline": float(deadline),
+                "valid_for_seconds": float(deadline) - float(self.clock())}
+            self._consumed.add(receipt["mac"])
+            try:
+                result = atomic_adapter(preconditions)
+            except Refused:
+                # The trusted adapter contract permits this only when its
+                # atomic preconditions failed before the action.
+                raise
+            except Exception as error:
+                raise Unresolved("browser action outcome is unknown; do not retry") from error
+            if (not isinstance(result, dict) or result.get("clicked") is not True
+                    or result.get("precondition_sha256") != digest):
+                raise Unresolved("atomic adapter receipt does not prove the requested action")
+            try:
+                destination = result["destination"]
+                if _origin(destination) != self.allowed_origin:
+                    raise ValueError
+            except (KeyError, Refused, ValueError) as error:
+                raise Unresolved("browser action destination is not independently allowed") from error
+            return {"status":"VERIFIED_BROWSER_ACTION", "session":self.session_id,
+                    "revision":receipt["revision"], "target_id":target_id,
+                    "destination":destination, "state_sha256":digest,
+                    "browser_authority_verified":True, "release_ready":False}
 
 
 def digest_manifest(manifest):

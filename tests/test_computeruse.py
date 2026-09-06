@@ -127,6 +127,66 @@ class Artifacts(unittest.TestCase):
         print("[browser-selector] a click selector reaches the server; file and private-network URL targets still refuse")
 
 
+class BrowserAuthority(unittest.TestCase):
+    def setUp(self):
+        self.now = [100.0]
+        self.auth = C.BrowserAuthority("http://portal.test", session_id="session-a",
+                                       clock=lambda: self.now[0], max_age=5.0)
+        self.state = {"url":"http://portal.test/invoices", "title":"Invoices",
+            "dialog":False, "expired":False,
+            "links":[{"id":"INV-0", "href":"http://portal.test/invoice/INV-0",
+                      "text":"Download INV-0",
+                      "box":{"x":10,"y":20,"width":100,"height":20}}]}
+
+    def test_receipt_forgery_staleness_restart_and_deadline_refuse(self):
+        receipt = self.auth.observe(self.state)
+        forged = copy.deepcopy(receipt); forged["state"]["title"] = "forged"
+        # The digest is public and recomputable; only the authority's MAC is a seal.
+        forged["state_sha256"] = hashlib.sha256(C._canonical(forged["state"])).hexdigest()
+        with self.assertRaises(C.Refused): self.auth.execute_click(forged,"INV-0",104.0,lambda p: {})
+        self.auth.observe(dict(self.state,title="new observation"))
+        with self.assertRaises(C.Refused): self.auth.execute_click(receipt,"INV-0",104.0,lambda p: {})
+        other = C.BrowserAuthority("http://portal.test",session_id="session-b",clock=lambda:self.now[0])
+        with self.assertRaises(C.Refused): other.execute_click(receipt,"INV-0",104.0,lambda p: {})
+        fresh = self.auth.observe(self.state); self.now[0] = 106.0
+        with self.assertRaises(C.Refused): self.auth.execute_click(fresh,"INV-0",104.0,lambda p: {})
+        print("[browser-receipt] forged, superseded, restarted-session and expired observations refuse")
+
+    def test_target_and_destination_are_exact(self):
+        for changed in (
+            dict(self.state,links=[]),
+            dict(self.state,links=self.state["links"]*2),
+            dict(self.state,links=[dict(self.state["links"][0],href="https://elsewhere.test/x")]),
+            dict(self.state,links=[dict(self.state["links"][0],box={"x":0,"y":0,"width":0,"height":1})]),
+            dict(self.state,dialog=True), dict(self.state,expired=True)):
+            with self.subTest(changed=changed):
+                with self.assertRaises(C.Refused): self.auth.observe(changed)
+        print("[browser-target] absent, duplicate, off-origin, dialog-blocked and expired states refuse")
+
+    def test_one_use_atomic_action_and_uncertain_failure(self):
+        receipt=self.auth.observe(self.state)
+        seen=[]
+        def adapter(preconditions):
+            seen.append(preconditions)
+            return {"precondition_sha256":preconditions["state_sha256"],"clicked":True,
+                    "destination":"http://portal.test/invoice/INV-0"}
+        result=self.auth.execute_click(receipt,"INV-0",104.0,adapter)
+        self.assertTrue(result["browser_authority_verified"])
+        self.assertFalse(result["release_ready"])
+        self.assertEqual(len(seen),1)
+        with self.assertRaises(C.Refused): self.auth.execute_click(receipt,"INV-0",104.0,adapter)
+        receipt2=self.auth.observe(self.state)
+        with self.assertRaises(C.Unresolved):
+            self.auth.execute_click(receipt2,"INV-0",104.0,
+                                    lambda p: (_ for _ in ()).throw(RuntimeError("lost response")))
+        with self.assertRaises(C.Refused): self.auth.execute_click(receipt2,"INV-0",104.0,adapter)
+        receipt3=self.auth.observe(self.state)
+        with self.assertRaises(C.Refused):
+            self.auth.execute_click(receipt3,"INV-0",104.0,
+                                    lambda p: (_ for _ in ()).throw(C.Refused("precondition changed")))
+        print("[browser-action] exact preconditions execute once; uncertain adapter failure cannot retry")
+
+
 if __name__ == "__main__":
     result = unittest.main(exit=False)
     if not result.result.wasSuccessful():

@@ -12,7 +12,7 @@ continuously, prove what they did, and remember what they learned.**
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![tests](https://img.shields.io/badge/tests-156%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-56%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-60%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
 119 Python modules · 156 registered acceptance tests · one HTML control panel · no
@@ -158,7 +158,7 @@ are laws with tests that would fail, not features with descriptions.**
 
 | Property | The well-known harnesses | Expert Fleet |
 |---|---|---|
-| Who says "done"? | the model or its framework judges its own run | frozen, caller-authored graders sealed before planning, run only by the harness; even the judge is overruled when they disagree — **56/56 mutation-tested laws** |
+| Who says "done"? | the model or its framework judges its own run | frozen, caller-authored graders sealed before planning, run only by the harness; even the judge is overruled when they disagree — **60/60 mutation-tested laws** |
 | Self-improvement | trust the loop to compound | validation-gated: a procedure is PROVEN only after 3 wins in which its own steps verified **and the caller's independent acceptance test passed afterwards**; oscillation stops the lane; drafts refuse to run — matching what the 2026 fragility literature demands |
 | Learn by demonstration | recorded, then trusted | `runbook.py record`: recorded → **CANDIDATE**; a rehearsal replays the demo through the full authority stack, which proves the recording RUNS and earns no trust — a procedure grading its own replay is still the procedure grading itself; a demo you watched is a claim, a demo the *caller's* graders accepted is evidence |
 | Security | wrapper products exist *because* the frameworks need wrapping (see the published security analyses of the popular ones) | six mandatory authorities inside the platform — Execution, File, Credential, Model Gateway, Effect, Control Plane — `--audit` at 0 bypasses **in CI**, a worker that cannot change its own authority even through a shell, plus directive-shaped memory flagged at the source |
