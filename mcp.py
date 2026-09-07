@@ -24,6 +24,9 @@ import time
 
 LEGACY_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "expert-fleet", "version": "1.0"}
+MAX_PENDING_REQUESTS = 64
+MAX_FRAME_CHARS = 4_194_304
+READER_JOIN_TIMEOUT_SECONDS = 2.0
 
 # An allowlist, not a secret-name blacklist: unknown variables never leak.
 # HOME is needed by package runners but grants no environment credentials.
@@ -105,51 +108,100 @@ class Server:
             and spec.get("shell", False))
         self._id = 0
         self._era = None          # set only after a supported handshake
+        self._send_lock = threading.Lock()
+        self._id_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending = {}
+        self._terminal_error = None
+        self._reader = threading.Thread(target=self._read_frames, daemon=True,
+                                        name=f"mcp-reader-{self.proc.pid}")
+        self._reader.start()
 
     # --- plumbing -------------------------------------------------------
     def _send(self, msg):
-        self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        self.proc.stdin.flush()
+        with self._send_lock:
+            with self._pending_lock:
+                if self._terminal_error is not None:
+                    raise RuntimeError(self._terminal_error)
+            try:
+                self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError) as exc:
+                self._terminate("MCP transport closed during send")
+                raise RuntimeError(self._terminal_error) from exc
 
-    def _read_response(self, want_id):
-        """Read frames until the response with our id arrives; a reader
-        thread + join gives us a real timeout on a wedged server."""
-        box = {}
+    def _terminate(self, error):
+        """Publish one stable terminal failure and wake every registered call."""
+        with self._pending_lock:
+            if self._terminal_error is None:
+                self._terminal_error = error
+            for slot in self._pending.values():
+                slot["error"] = self._terminal_error
+                slot["event"].set()
+            self._pending.clear()
 
-        def reader():
+    def _read_frames(self):
+        """The only stdout owner for this process, including after a timeout."""
+        try:
             while True:
-                line = self.proc.stdout.readline()
+                line = self.proc.stdout.readline(MAX_FRAME_CHARS + 1)
                 if not line:
-                    box["error"] = "server closed the pipe"
+                    self._terminate("MCP server closed the pipe")
                     return
-                line = line.strip()
-                if not line:
+                if len(line) > MAX_FRAME_CHARS or not line.endswith("\n"):
+                    self._terminate("MCP frame oversized or unterminated")
+                    return
+                if not line.strip():
                     continue
                 try:
                     msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if msg.get("id") == want_id:
-                    box["msg"] = msg
+                except (ValueError, RecursionError):
+                    self._terminate("MCP malformed JSON frame")
                     return
-                # notifications and foreign ids are ignored
-
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        t.join(self.timeout)
-        if "msg" in box:
-            return box["msg"]
-        raise TimeoutError(box.get("error")
-                           or f"no response from '{self.name}' within "
-                              f"{self.timeout}s")
+                if not isinstance(msg, dict):
+                    self._terminate("MCP malformed response frame")
+                    return
+                # Notifications, server requests and late/foreign IDs have no
+                # pending response owner. Do not retain any of their data.
+                if "method" in msg or "id" not in msg:
+                    continue
+                if type(msg["id"]) is not int:
+                    continue
+                with self._pending_lock:
+                    slot = self._pending.pop(msg["id"], None)
+                    if slot is not None:
+                        slot["msg"] = msg
+                        slot["event"].set()
+        except (OSError, ValueError):
+            self._terminate("MCP transport closed while reading a frame")
 
     def _rpc(self, method, params=None):
-        self._id += 1
-        msg = {"jsonrpc": "2.0", "id": self._id, "method": method}
+        with self._id_lock:
+            self._id += 1
+            request_id = self._id
+        slot = {"event": threading.Event()}
+        with self._pending_lock:
+            if self._terminal_error is not None:
+                raise RuntimeError(self._terminal_error)
+            if len(self._pending) >= MAX_PENDING_REQUESTS:
+                raise RuntimeError("MCP pending request capacity reached")
+            self._pending[request_id] = slot
+        msg = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
             msg["params"] = params
-        self._send(msg)
-        resp = self._read_response(self._id)
+        try:
+            self._send(msg)
+            slot["event"].wait(self.timeout)
+            with self._pending_lock:
+                if "error" in slot:
+                    raise RuntimeError(slot["error"])
+                if "msg" not in slot:
+                    raise TimeoutError(f"no response from '{self.name}' within "
+                                       f"{self.timeout}s")
+                resp = slot["msg"]
+        finally:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
         if "error" in resp:
             raise RuntimeError(f"{method} failed: "
                                f"{resp['error'].get('message')} "
@@ -186,15 +238,20 @@ class Server:
                          {"name": tool, "arguments": arguments or {}})
 
     def close(self):
+        self._terminate("MCP transport closed by client")
+        deadline = time.monotonic() + READER_JOIN_TIMEOUT_SECONDS
+        # Kill before touching the pipe locks: a server that stopped reading
+        # stdin can have a sender blocked in write/flush. Killing releases it.
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(max(0, deadline - time.monotonic()))
+        self._reader.join(max(0, deadline - time.monotonic()))
+        if self._reader.is_alive():
+            raise RuntimeError("MCP reader did not stop within close timeout")
         try:
             self.proc.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
-        try:
-            self.proc.wait(3)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(3)
         self.proc.stdout.close()
 
 

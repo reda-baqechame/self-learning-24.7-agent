@@ -21,6 +21,22 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("mcp transport: second stdout reader", "mcp.py",
+     '        self._reader.start()',
+     '        self._reader.start()\n        threading.Thread(target=self._read_frames, daemon=True).start()',
+     "test_mcp_hardening.py", "one thread must own every stdout read across timeouts"),
+    ("mcp transport: wrong-ID response delivery", "mcp.py",
+     '                    slot = self._pending.pop(msg["id"], None)',
+     '                    slot = self._pending.pop(next(iter(self._pending), None), None)',
+     "test_mcp_hardening.py", "reversed and late responses must reach only their request ID"),
+    ("mcp transport: timeout slot retained", "mcp.py",
+     '                self._pending.pop(request_id, None)',
+     '                pass',
+     "test_mcp_hardening.py", "timeout must free its slot so the next call can dispatch"),
+    ("mcp transport: EOF leaves waiters asleep", "mcp.py",
+     '                    self._terminate("MCP server closed the pipe")',
+     '                    pass',
+     "test_mcp_hardening.py", "EOF must wake all waiters before their request timeouts"),
     ("computer: browser selector misclassified as URL", "mcp.py",
      '        looks_urlish = ((str(k).lower() in _URL_KEYS and not selector_target)',
      '        looks_urlish = ((str(k).lower() in _URL_KEYS)',
