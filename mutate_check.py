@@ -21,6 +21,23 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("panel goal: raw grader field restored", "ui.html",
+     'class="field gGate" aria-label="acceptance gate"',
+     'class="field" id="gAccept" aria-label="acceptance gate"',
+     "test_ledger_defects.py", "goal form must expose named gates only"),
+
+    ("mission work: acceptance gate made optional", "ui.py",
+     '''    if not d.get("done_check"):
+        raise ValueError("mission work needs a named acceptance gate")
+    done_check = _net_gate(d["done_check"])''',
+     '''    done_check = _net_gate(d.get("done_check"))''',
+     "test_ledger_defects.py", "ungated mission work was queued"),
+
+    ("panel routes: browser history overwritten", "ui.html",
+     'if(S.routeReady) history.pushState(null, "", h);',
+     'if(S.routeReady) history.replaceState(null, "", h);',
+     "test_ledger_defects.py", "Back/Forward route history must be retained"),
+
     ("panel goal: raw network grader accepted", "ui.py",
      '''        if not isinstance(spec, dict):
             raise ValueError("goal acceptance over the network must name a gate")''',

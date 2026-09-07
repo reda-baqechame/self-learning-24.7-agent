@@ -38,6 +38,7 @@ import contract                 # noqa: E402
 import federation               # noqa: E402
 import fileauth                 # noqa: E402
 import harness                  # noqa: E402
+import mission                  # noqa: E402
 import modelgateway             # noqa: E402
 import templates                # noqa: E402
 import ui                       # noqa: E402
@@ -45,6 +46,11 @@ import ui                       # noqa: E402
 
 def _read(rel):
     return io.open(os.path.join(AGENT_DIR, rel), encoding="utf-8").read()
+
+
+def _read_json(path):
+    with io.open(path, encoding="utf-8") as f:
+        return __import__("json").load(f)
 
 
 # --------------------------------------------------------------- 1 doctor
@@ -87,6 +93,10 @@ def check_panel_names_a_gate():
         "the task dialog must carry a gate picker"
     for gate in ("exists", "designcheck", "citecheck", "verify", "memcheck"):
         assert f'value="{gate}"' in page, gate
+    assert 'id="gAccept"' not in page and "what::command" not in page, (
+        "the goal form still invites a browser caller to author shell")
+    assert 'gGate"' in page and "collectGoalAcceptance" in page, (
+        "the goal form needs a repeatable named-gate picker")
     built = ui._net_gate({"gate": "exists", "path": "out/index.html"})
     assert built and "out/index.html" in built, built
     built = ui._net_gate({"gate": "verify", "course": "onboarding"})
@@ -162,6 +172,68 @@ def check_goal_limits_are_finite_before_work():
     print("[goal-input] goal spend, time and cycle limits are finite and in "
           "range before any state is written; zero retains its documented "
           "no-extra-cap meaning")
+
+
+def check_mission_work_is_bound_before_queueing():
+    with tempfile.TemporaryDirectory(prefix="mission-work-") as root:
+        with io.open(os.path.join(root, "settings.toml"), "w",
+                     encoding="utf-8") as f:
+            f.write('[agent]\nsandbox = "host"\nallow_unsafe_host = true\n')
+        rec = mission.create(root, "publish a checked report",
+                             ["the report exists", "citations pass"])
+        out = ui.queue_mission_task("unused-home", "owner", root, {
+            "mission": rec["id"], "criterion": "C1",
+            "role": "practitioner", "goal": "write out/report.md",
+            "expected_evidence": "out/report.md exists and is reviewable",
+            "done_check": {"gate": "exists", "path": "out/report.md"},
+        }, launch=False)
+        assert out["criterion"] == "C1" and out["queued"], out
+        state = _read_json(os.path.join(root, "state.json"))
+        task = state["tasks"][-1]
+        assert task["mission"] == rec["id"] and task["criterion"] == "C1", task
+        assert "out/report.md" in task["done_check"], task
+        saved = mission.load(root, rec["id"])
+        assert saved["actions"][-1]["task"] == task["id"], saved["actions"]
+        assert saved["actions"][-1]["expected_evidence"].startswith("out/report"), saved
+
+        before = len(state["tasks"])
+        for bad in (
+                {"mission": rec["id"], "criterion": "C2", "goal": "cite it",
+                 "expected_evidence": "citations pass"},
+                {"mission": rec["id"], "criterion": "C9", "goal": "adjacent",
+                 "expected_evidence": "something",
+                 "done_check": {"gate": "exists", "path": "out/x"}}):
+            try:
+                ui.queue_mission_task("unused-home", "owner", root, bad,
+                                      launch=False)
+            except (KeyError, ValueError):
+                pass
+            else:
+                raise AssertionError(f"unbound mission work was queued: {bad}")
+        assert len(_read_json(os.path.join(root, "state.json"))["tasks"]) == before
+        # loop.Agent attaches a Windows file handler; close it before the
+        # temporary directory asks Windows to remove the log.
+        __import__("logging").shutdown()
+    print("[mission-work] queued mission work names its open criterion, "
+          "expected evidence and catalogue gate; missing gates and unrelated "
+          "criteria are refused before a task is queued")
+
+
+def check_panel_language_and_routes_are_truthful():
+    page = _read("ui.html")
+    for unsupported in ("99–100%", "95–99%"):
+        assert unsupported not in page, f"unsupported quality claim remains: {unsupported}"
+    assert "mission saved" in page and "mission started" not in page, (
+        "saving a contract is still described as execution")
+    assert "/mission_task" in page and "Queue and start" in page, (
+        "a saved mission has no explicit criterion-bound start path")
+    assert "history.pushState" in page and '"#mission/"' in page, (
+        "navigation still cannot preserve mission context in browser history")
+    assert "routeChanged" in page and "decodeURIComponent" in page, (
+        "deep links lack a guarded Back/Forward route handler")
+    print("[panel-truth] quality copy names evidence instead of invented rates; "
+          "mission save and execution are separate; goal and mission context "
+          "have shareable Back/Forward routes")
 
 
 # ---------------------------------------------------------------- 3 invite
@@ -284,6 +356,8 @@ def main():
     check_doctor_reports_import_failures()
     check_panel_names_a_gate()
     check_goal_limits_are_finite_before_work()
+    check_mission_work_is_bound_before_queueing()
+    check_panel_language_and_routes_are_truthful()
     check_invite_posts_no_actor()
     check_subquery_purpose_is_declared()
     check_case_ledger_is_control()

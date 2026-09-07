@@ -605,7 +605,8 @@ POST_PERMISSION = {
 }
 # per-expert actions: POST /api/experts/<slug>/<action>
 ACTION_PERMISSION = {
-    "task": "run", "goal": "run", "consult": "run", "answer": "run",
+    "task": "run", "mission_task": "run", "goal": "run",
+    "consult": "run", "answer": "run",
     "start": "run", "stop": "run", "launch": "run", "wake": "run",
     "scan": "run", "url": "run", "verify": "run", "memcheck": "run",
     "probe": "run", "workflow": "run", "intention": "run",
@@ -888,6 +889,43 @@ def _goal_request(data):
         }
     except contractmod.ContractError as e:
         raise ValueError(str(e)) from None
+
+
+def queue_mission_task(home, slug, root, data, launch=True):
+    """Bind one checked task to one open mission criterion, then queue it."""
+    import mission
+    d = data if isinstance(data, dict) else {}
+    mid = str(d.get("mission") or "").strip()
+    criterion = str(d.get("criterion") or "").strip()
+    role = str(d.get("role") or "practitioner").strip()
+    task_goal = str(d.get("goal") or "").strip()
+    expected = str(d.get("expected_evidence") or "").strip()
+    if not re.fullmatch(r"m-[A-Za-z0-9-]{1,80}", mid):
+        raise ValueError("mission must be a valid mission id")
+    if not re.fullmatch(r"C[1-9][0-9]*", criterion):
+        raise ValueError("criterion must name one mission criterion, such as C1")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role):
+        raise ValueError("role must be a simple role name")
+    if not task_goal:
+        raise ValueError("mission work needs a task goal")
+    if not expected:
+        raise ValueError("mission work needs expected evidence")
+    if not d.get("done_check"):
+        raise ValueError("mission work needs a named acceptance gate")
+    done_check = _net_gate(d["done_check"])
+    chain = mission.justify(root, mid, criterion,
+                            milestone=d.get("milestone") or None,
+                            task_goal=task_goal,
+                            expected_evidence=expected)
+    tid = loop.Agent(root).add_task(
+        role, task_goal, [f for f in d.get("memory_files", []) if f],
+        d.get("course") or None, done_check=done_check,
+        stop=d.get("stop") or None, mission=mid, criterion=criterion)
+    mission.record_action(root, mid, chain, task_id=tid, status="queued")
+    if launch and not is_running(slug):
+        start_expert(home, slug)
+    return {"queued": tid, "mission": mid, "criterion": criterion,
+            "running": bool(launch)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1426,6 +1464,8 @@ class Handler(BaseHTTPRequestHandler):
                 done_check=_net_gate(data.get("done_check")),
                 stop=data.get("stop") or None)
             return {"queued": tid}
+        if action == "mission_task":
+            return queue_mission_task(self.home, slug, root, self._data)
         if action == "wake":
             # wake-on-event: an external system (webhook, cron, another
             # agent) delivers an event; armed `event` intentions fire at

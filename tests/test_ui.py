@@ -117,6 +117,25 @@ def main():
                              ("id", "role", "status", "goal", "steps", "created"))
         print("[board] full task list served with ids, steps, ages")
 
+        # Saving a mission contract and starting criterion-bound work are two
+        # distinct operations. The second carries its reason and gate into
+        # both the task queue and the durable mission action ledger.
+        mr = api("POST", "/api/missions", {
+            "expert": "deep-learner", "objective": "publish a checked report",
+            "criteria": ["the report exists"]})
+        assert mr.get("mission") and mr.get("criteria") == 1, mr
+        mw = api("POST", "/api/experts/deep-learner/mission_task", {
+            "mission": mr["mission"], "criterion": "C1",
+            "role": "practitioner", "goal": "write out/report.md",
+            "expected_evidence": "out/report.md exists",
+            "done_check": {"gate": "exists", "path": "out/report.md"}})
+        assert mw.get("queued") and mw.get("running") is True, mw
+        mv = api("GET", "/api/experts/deep-learner/missions/" + mr["mission"])
+        assert mv["actions"] == 1 and mv["current_action"]["task"] == mw["queued"], mv
+        api("POST", "/api/experts/deep-learner/stop", {})
+        print("[mission-work] saving defined the contract; a separate checked "
+              "action bound C1, queued its task and started the agent")
+
         # --- mission control: memory browser
         tree = api("GET", "/api/experts/deep-learner/tree")
         paths = {e["p"] for e in tree}
