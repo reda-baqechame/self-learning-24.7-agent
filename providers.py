@@ -24,12 +24,15 @@ import json
 import os
 import re
 import sys
+import tempfile
 import tomllib
 import urllib.error
 import urllib.request
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HOME)
+
+import locks
 
 # well-known rails, so "add" is one word instead of a URL hunt — and so a
 # key dropped into agent.env can be AUTO-WIRED (see detect() and
@@ -169,18 +172,33 @@ def save(root, cfg):
     # validate before replacing: a broken settings.toml would stop the expert
     tomllib.loads(text)
     p = os.path.join(root, "settings.toml")
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, p)
+    fd, tmp = tempfile.mkstemp(prefix="settings.toml.", suffix=".tmp", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     return text
+
+
+def _update(root, mutate):
+    """Serialize a complete read-modify-save transaction across processes."""
+    p = os.path.join(root, "settings.toml")
+    with locks.holding(p + ".update", timeout=20, stale=60):
+        cfg = load(root)
+        result = mutate(cfg)
+        save(root, cfg)
+        return result
 
 
 # ------------------------------------------------------------ operations
 
 def add(root, name, base_url=None, key_env=None, native_tools=None,
         headers=None, prices=None):
-    cfg = load(root)
     if not base_url and name in KNOWN:
         p = rail(name)                        # expands URL placeholders and
         base_url = p["base_url"]              # names what is missing
@@ -196,9 +214,10 @@ def add(root, name, base_url=None, key_env=None, native_tools=None,
         p.update(prices)
     if headers:
         p["extra_headers"] = headers
-    cfg.setdefault("providers", {})[name] = p
-    save(root, cfg)
-    return p
+    def mutate(cfg):
+        cfg.setdefault("providers", {})[name] = p
+        return p
+    return _update(root, mutate)
 
 
 def catalog(root, name, filt="", free_only=False, limit=40):
@@ -241,22 +260,22 @@ def catalog(root, name, filt="", free_only=False, limit=40):
 def set_role(root, role, provider, model, fallback_provider=None,
              fallback_model=None, escalate_provider=None, escalate_model=None,
              tools=None):
-    cfg = load(root)
-    if provider not in cfg.get("providers", {}):
-        raise SystemExit(f"ERROR: unknown provider '{provider}' — add it first")
-    r = dict(cfg.get("roles", {}).get(role, {}))
-    r.update({"provider": provider, "model": model})
-    if fallback_provider:
-        r["fallback_provider"] = fallback_provider
-        r["fallback_model"] = fallback_model or model
-    if escalate_model:
-        r["escalate_provider"] = escalate_provider or provider
-        r["escalate_model"] = escalate_model
-    if tools is not None:
-        r["tools"] = tools
-    cfg.setdefault("roles", {})[role] = r
-    save(root, cfg)
-    return r
+    def mutate(cfg):
+        if provider not in cfg.get("providers", {}):
+            raise SystemExit(f"ERROR: unknown provider '{provider}' — add it first")
+        r = dict(cfg.get("roles", {}).get(role, {}))
+        r.update({"provider": provider, "model": model})
+        if fallback_provider:
+            r["fallback_provider"] = fallback_provider
+            r["fallback_model"] = fallback_model or model
+        if escalate_model:
+            r["escalate_provider"] = escalate_provider or provider
+            r["escalate_model"] = escalate_model
+        if tools is not None:
+            r["tools"] = tools
+        cfg.setdefault("roles", {})[role] = r
+        return r
+    return _update(root, mutate)
 
 
 def summary(root):
