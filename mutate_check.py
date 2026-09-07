@@ -123,7 +123,7 @@ MUTATIONS = [
      "test_computeruse.py", "the shipped observation requires owner-bound enablement"),
     ("computer: untrusted atomic action enabled", "computeruse.py",
      'def playwright_atomic_click(server, root, preconditions, trace=None):\n'
-     '    """Enforce one invoice target and click in one Playwright JavaScript turn.\n\n'
+     '    """Bounded locator click; legacy name does not imply atomic check-and-act.\n\n'
      '    The owner must opt this adapter into the MCP server\'s trusted identity.\n'
      '    Network containment remains the server configuration\'s responsibility.\n'
      '    """\n'
@@ -131,7 +131,7 @@ MUTATIONS = [
      '    spec = getattr(server, "spec", {}) or {}\n'
      '    if spec.get("atomic_browser_adapter") is not True:',
      'def playwright_atomic_click(server, root, preconditions, trace=None):\n'
-     '    """Enforce one invoice target and click in one Playwright JavaScript turn.\n\n'
+     '    """Bounded locator click; legacy name does not imply atomic check-and-act.\n\n'
      '    The owner must opt this adapter into the MCP server\'s trusted identity.\n'
      '    Network containment remains the server configuration\'s responsibility.\n'
      '    """\n'
@@ -147,6 +147,26 @@ MUTATIONS = [
      '            and _authority is not _COMPUTER_AUTHORITY):',
      '            and False):',
      "test_computeruse.py", "an atomic-adapter server must deny direct evaluator calls"),
+    ("computer: visibility actionability removed", "computeruse.py",
+     "    code = _HOST_CLICK % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "    code = _HOST_CLICK.replace(\"if(s.visibility!=='visible'||s.display==='none'||r.width<=0||r.height<=0)\", \"if(false)\").replace(\"await locator.click({trial:true,force:false,timeout:remaining()});\", \"/* mutation removes actionability trial */\").replace(\"await locator.click({force:false,timeout:remaining()});\", \"await locator.click({force:true,timeout:remaining()});\").replace(\"if(!hit || !(a===hit || a.contains(hit)))\", \"if(false)\") % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "test_computeruse_live.py", "real activation counters must reject missing visibility protection"),
+    ("computer: enabled actionability removed", "computeruse.py",
+     "    code = _HOST_CLICK % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "    code = _HOST_CLICK.replace(\"if(a.closest('[disabled],[aria-disabled=\\\"true\\\"],[inert]'))\", \"if(false)\") % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "test_computeruse_live.py", "real activation counters must reject missing enabled protection"),
+    ("computer: hit-test actionability removed", "computeruse.py",
+     "    code = _HOST_CLICK % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "    code = _HOST_CLICK.replace(\"if(!hit || !(a===hit || a.contains(hit)))\", \"if(false)\").replace(\"await locator.click({trial:true,force:false,timeout:remaining()});\", \"/* mutation removes actionability trial */\").replace(\"await locator.click({force:false,timeout:remaining()});\", \"await locator.click({force:true,timeout:remaining()});\") % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "test_computeruse_live.py", "real activation counters must reject missing hit-test protection"),
+    ("computer: tab-frame actionability removed", "computeruse.py",
+     "    code = _HOST_CLICK % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "    code = _HOST_CLICK.replace(\"host.tab===p.binding.tab && host.frame===p.binding.frame && host.document===p.binding.document\", \"true\") % (json.dumps(p, separators=(\",\", \":\"), allow_nan=False), deadline_epoch)",
+     "test_computeruse_live.py", "real activation counters must reject missing tab-frame protection"),
+    ("computer: post observation omitted", "computeruse.py",
+     '        parsed["post_observation"] = playwright_observe(server, root, trace)',
+     '        pass',
+     "test_computeruse.py", "dispatch without post-observation must not report success"),
     ("providers: unrelated root settings dropped", "providers.py",
      '    _emit_table(lines, (), cfg)',
      '    _emit_table(lines, (), {k: v for k, v in cfg.items() if k in ("agent", "providers", "roles")})',

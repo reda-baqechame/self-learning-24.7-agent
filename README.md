@@ -5,17 +5,46 @@
 > checks, general-purpose computer reliability or release readiness. See
 > [the phase contract](docs/DESIGN-bounded-computer-use.md).
 
+The bounded invoice click adapter now uses Playwright locator actionability.
+It requires an exact, visible, enabled, stable, hit-testable main-frame target,
+an unchanged host Page/Frame/document identity, and a fresh preflight. The
+legacy function name `playwright_atomic_click` is retained for callers, but
+trial and click are separate operations: page code can run between them. A
+successful input acknowledgment is `ACTION_DISPATCHED`, with a separate fresh
+`post_observation` and `workflow_verified: false`. Failed dispatch/readback is
+`UNKNOWN` and the consumed receipt cannot be retried.
+
+The owner must explicitly review `computer_locator_tool: "browser_run_code_unsafe"`
+and recompute `trust_identity`; the field is identity-bound. Missing/mismatched
+pins or missing opt-in refuse. This tool runs host JavaScript and is
+RCE-equivalent in Playwright MCP 0.0.79, so generic/model calls to both run-code
+spellings and the raw evaluator are denied on opted-in adapter servers. Only
+fixed host code builds the locator from the sealed bounded invoice ID. Existing
+server configurations are not automatically enabled. Retained element handles
+live on the host Page, are replaced on observation and disposed on navigation
+or close; website JavaScript cannot edit the host binding. Targets in child
+frames remain outside this adapter's action vocabulary.
+
+`tests/test_computeruse_live.py` is an opt-in synthetic Chromium fixture using
+the pinned MCP image and a disposable `--network=none` container, with no
+personal profile or provider. Set `AGENT_COMPUTER_LIVE=1` to run it; otherwise
+the suite explicitly reports a skip. It asserts exact activation counts for
+valid input, hidden/covered/disabled targets, detached/duplicate/moved/replaced
+nodes, frame transfer, same-URL page/tab replacement, and lost post-readback.
+These development checks do not establish production or cross-platform release
+readiness. Origin/network/redirect containment remains owner configured.
+
 **A file-backed, stdlib-only platform for building expert AI agents that work
 continuously, prove what they did, and remember what they learned.**
 
 [![tests](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
-![tests](https://img.shields.io/badge/tests-156%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-84%20registered-blue)
+![tests](https://img.shields.io/badge/tests-157%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-89%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
-119 Python modules · 156 registered acceptance tests · one HTML control panel · no
+119 Python modules · 157 registered acceptance tests · one HTML control panel · no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 ```bash

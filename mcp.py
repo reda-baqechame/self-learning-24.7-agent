@@ -58,7 +58,7 @@ def server_environment(spec, environ=None):
 def server_identity(spec):
     """Identity of owner-approved code/config, never the raw credential."""
     fields = ("cmd", "args", "shell", "version", "integrity", "source",
-              "env_allow", "env", "atomic_browser_adapter")
+              "env_allow", "env", "atomic_browser_adapter", "computer_locator_tool")
     blob = json.dumps({k: spec[k] for k in fields if k in spec},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -475,10 +475,10 @@ def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
                 f"tool '{tool}' is denied for server '{s.name}' by mcp.json "
                 f"policy"}]}, "denied"
     spec = getattr(s, "spec", {}) or {}
-    if (spec.get("atomic_browser_adapter") is True and tool == "browser_evaluate"
+    if (spec.get("atomic_browser_adapter") is True and tool in ("browser_evaluate", "browser_run_code", "browser_run_code_unsafe")
             and _authority is not _COMPUTER_AUTHORITY):
         return {"isError": True, "content": [{"type": "text", "text":
-                "raw browser_evaluate is denied for an atomic-adapter server; "
+                "raw browser code is denied for a bounded-adapter server; "
                 "use the sealed computer authority path"}]}, "denied"
     # WHERE the tool is being pointed, not just WHICH tool it is.
     #

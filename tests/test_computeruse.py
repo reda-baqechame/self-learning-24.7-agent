@@ -136,6 +136,7 @@ class BrowserAuthority(unittest.TestCase):
         self.auth = C.BrowserAuthority("http://portal.test", session_id="session-a",
                                        clock=lambda: self.now[0], max_age=5.0)
         self.state = {"url":"http://portal.test/invoices", "title":"Invoices",
+            "binding":{"tab":"tab-a", "frame":"frame-a", "document":1},
             "dialog":False, "expired":False,
             "links":[{"id":"INV-0", "href":"http://portal.test/invoice/INV-0",
                       "text":"Download INV-0",
@@ -172,10 +173,14 @@ class BrowserAuthority(unittest.TestCase):
         def adapter(preconditions):
             seen.append(preconditions)
             return {"precondition_sha256":preconditions["state_sha256"],"clicked":True,
+                    "status":"ACTION_DISPATCHED", "post_observation":self.state,
                     "destination":"http://portal.test/invoice/INV-0"}
         result=self.auth.execute_click(receipt,"INV-0",104.0,adapter)
         self.assertTrue(result["browser_authority_verified"])
         self.assertFalse(result["release_ready"])
+        self.assertEqual(result["status"], "ACTION_DISPATCHED")
+        self.assertFalse(result["workflow_verified"])
+        self.assertEqual(result["post_observation"], self.state)
         self.assertEqual(len(seen),1)
         with self.assertRaises(C.Refused): self.auth.execute_click(receipt,"INV-0",104.0,adapter)
         receipt2=self.auth.observe(self.state)
@@ -193,29 +198,45 @@ class BrowserAuthority(unittest.TestCase):
         receipt=self.auth.observe(self.state)
         calls=[]
         spec={"cmd":"fixture", "args":[], "atomic_browser_adapter":True,
-              "approval":"all", "no_approval":["browser_evaluate"],
-              "allow_tools":["browser_evaluate"]}
+              "computer_locator_tool":"browser_run_code_unsafe",
+              "approval":"all", "no_approval":["browser_evaluate", "browser_run_code_unsafe", "browser_run_code"],
+              "allow_tools":["browser_evaluate", "browser_run_code_unsafe", "browser_run_code"]}
         spec["trust_identity"]=mcp.server_identity(spec)
+        self.assertNotEqual(spec['trust_identity'],mcp.server_identity(dict(spec,computer_locator_tool='browser_evaluate')))
+        for omission in ('computer_locator_tool','trust_identity'):
+            unreviewed=dict(spec);unreviewed.pop(omission)
+            with self.assertRaises(C.Refused):
+                C.playwright_observe(SimpleNamespace(spec=unreviewed),str(self.root))
+        mismatched=dict(spec,trust_identity='0'*64)
+        with self.assertRaises(C.Refused):
+            C.playwright_observe(SimpleNamespace(spec=mismatched),str(self.root))
         self.assertNotEqual(spec["trust_identity"],mcp.server_identity(dict(spec,atomic_browser_adapter=False)))
         def reply(_name,args):
             calls.append(args)
-            body=(self.state if args.get("function")==C.PLAYWRIGHT_OBSERVE else
+            body=(self.state if 'const observe =' in args.get("code", "") else
                   {"precondition_sha256":receipt["state_sha256"],"clicked":True,
+                   "status":"ACTION_DISPATCHED",
                    "destination":"http://portal.test/invoice/INV-0"})
             return {"content":[{"type":"text","text":"### Result\n"+json.dumps(body)+"\n### Done"}]}
         server=SimpleNamespace(name="fixture-browser",spec=spec,
             tool_def=lambda name:{"name":name,"annotations":{"readOnlyHint":False}},call=reply)
         _,how=mcp.guarded_call(server,"browser_evaluate",{"function":"() => document.title"},root=str(self.root),fresh=True)
         self.assertEqual(how,"denied");self.assertEqual(calls,[])
+        for tool in ("browser_run_code", "browser_run_code_unsafe"):
+            _,how=mcp.guarded_call(server,tool,{"code":"async page => page.close()"},root=str(self.root),fresh=True)
+            self.assertEqual(how,"denied");self.assertEqual(calls,[])
         self.assertEqual(C.playwright_observe(server,str(self.root)),self.state)
         result=self.auth.execute_click(receipt,"INV-0",104.0,
             lambda p:C.playwright_atomic_click(server,str(self.root),p))
-        self.assertTrue(result["browser_authority_verified"]);self.assertEqual(len(calls),2)
+        self.assertTrue(result["browser_authority_verified"]);self.assertEqual(len(calls),3)
         disabled_spec=dict(spec,atomic_browser_adapter=False)
         disabled_spec["trust_identity"]=mcp.server_identity(disabled_spec)
         disabled=SimpleNamespace(name="disabled",spec=disabled_spec,call=reply)
         with self.assertRaises(C.Refused): C.playwright_observe(disabled,str(self.root))
         with self.assertRaises(C.Refused): C.playwright_atomic_click(disabled,str(self.root),{"valid_for_seconds":1})
+        with self.assertRaises(C.Refused):
+            self.auth.execute_click(self.auth.observe(self.state),'INV-0',104.0,
+                lambda p:C.playwright_atomic_click(disabled,str(self.root),p))
         for payload,error in (({"refused":"target changed"},C.Refused),({},C.Unresolved)):
             auth=C.BrowserAuthority("http://portal.test",clock=lambda:self.now[0])
             rec=auth.observe(self.state)
@@ -223,7 +244,15 @@ class BrowserAuthority(unittest.TestCase):
                 tool_def=server.tool_def,call=lambda n,a,p=payload:{"content":[{"type":"text","text":"### Result\n"+json.dumps(p)+"\n### Done"}]})
             with self.assertRaises(error):
                 auth.execute_click(rec,"INV-0",104.0,lambda p:C.playwright_atomic_click(bad,str(self.root),p))
-        print("[playwright-adapter] shipped atomic executor is identity-bound and refuses precondition or malformed readback")
+        print("[playwright-adapter] host locator executor is identity-bound, denies generic raw code, and refuses precondition or malformed readback")
+
+    def test_click_requires_post_observation_and_host_actionability(self):
+        receipt = self.auth.observe(self.state)
+        with self.assertRaises(C.Unresolved):
+            self.auth.execute_click(receipt, "INV-0", 104.0, lambda p: {
+                "clicked":True, "status":"ACTION_DISPATCHED", "precondition_sha256":p["state_sha256"],
+                "destination":self.state["links"][0]["href"]})
+        print("[post-observation] a dispatched click without fresh post-observation remains unknown")
 
 
 if __name__ == "__main__":

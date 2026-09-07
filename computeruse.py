@@ -1,9 +1,6 @@
-"""Independent artifact checks for the bounded browser phase; not browser authority.
+"""Bounded browser authority, host-owned Playwright clicks, and artifact checks.
 
-The trusted harness supplies the expected manifest and its pinned digest. Never
-accept that pair from the worker being evaluated. This module grants no effects,
-does not drive a browser, and cannot establish session or observation freshness.
-See docs/DESIGN-bounded-computer-use.md.
+Dispatch is not workflow verification. Network containment is owner configured.
 """
 import hashlib
 import hmac
@@ -26,6 +23,75 @@ PLAYWRIGHT_OBSERVE = """() => ({url:location.href, title:document.title,
   links:Array.from(document.querySelectorAll('a[data-invoice]')).map(a=>{const r=a.getBoundingClientRect();return {
     id:a.dataset.invoice,href:a.href,text:a.textContent,
     box:{x:r.x,y:r.y,width:r.width,height:r.height}}})})"""
+
+# These objects live on the Playwright HOST Page, never in the page JS realm.
+# MCP 0.0.79 creates a new VM per run-code call but passes the same Page object.
+_HOST_OBSERVE = """async page => {
+  const observe = %s;
+  let host=page.__boundedComputer;
+  if(!host){
+    host={tab:%s,frame:%s,document:1,main:page.mainFrame(),handles:[]};
+    page.__boundedComputer=host;
+    const clear=()=>{const old=host.handles;host.handles=[];
+      for(const h of old) h.dispose().catch(()=>{});};
+    page.on('framenavigated',f=>{if(f===page.mainFrame()){host.document++;clear();}});
+    page.on('close',clear);
+  }
+  const old=host.handles;host.handles=[];
+  await Promise.all(old.map(h=>h.dispose().catch(()=>{})));
+  const generation=host.document;
+  const handles=await page.locator('a[data-invoice]').elementHandles();
+  if(handles.length>1000){await Promise.all(handles.map(h=>h.dispose()));throw Error('too many targets');}
+  host.handles=handles;
+  const state=await page.evaluate(observe);
+  if(generation!==host.document || host.main!==page.mainFrame())throw Error('document changed during observation');
+  state.binding={tab:host.tab,frame:host.frame,document:host.document};
+  return state;
+}"""
+
+_HOST_CLICK = """async page => {
+  const p=%s, deadline=%d, host=page.__boundedComputer;
+  const remaining=()=>Math.max(1,deadline-Date.now());
+  const bindingOK=()=>host && !page.isClosed() && host.main===page.mainFrame() &&
+    host.tab===p.binding.tab && host.frame===p.binding.frame && host.document===p.binding.document;
+  if(!bindingOK())return {refused:'tab/frame/document changed'};
+  const locator=page.locator('a[data-invoice="'+p.target.id+'"]');
+  let original;
+  for(const h of host.handles){
+    try {if(await h.getAttribute('data-invoice')===p.target.id){original=h;break;}} catch(e){}
+  }
+  if(!original)return {refused:'observed element unavailable'};
+  const check=async()=>{
+    if(Date.now()>=deadline)return 'deadline';
+    if(!bindingOK())return 'tab/frame/document changed';
+    if(page.url()!==p.page_url)return 'page changed';
+    if(await locator.count()!==1)return 'target absent or ambiguous';
+    if(!await locator.evaluate((a,old)=>a===old,original))return 'element replaced';
+    return await locator.evaluate((a,p)=>{
+      if(document.querySelector('dialog[open],input[type=password]'))return 'blocked state';
+      const r=a.getBoundingClientRect(),s=getComputedStyle(a);
+      if(s.visibility!=='visible'||s.display==='none'||r.width<=0||r.height<=0)return 'not visible';
+      if(a.closest('[disabled],[aria-disabled="true"],[inert]'))return 'not enabled';
+      const hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+      if(!hit || !(a===hit || a.contains(hit)))return 'not hit-testable';
+      if(!a.isConnected||a.ownerDocument!==document)return 'detached';
+      if(a.href!==p.target.href||a.textContent!==p.target.text||
+        r.x!==p.target.box.x||r.y!==p.target.box.y||r.width!==p.target.box.width||r.height!==p.target.box.height)return 'target changed';
+      if(location.href!==p.page_url||new URL(a.href).origin!==p.allowed_origin)return 'origin changed';
+      return null;
+    },p);
+  };
+  try {
+    let reason=await check();if(reason)return {refused:reason};
+    await locator.click({trial:true,force:false,timeout:remaining()});
+    reason=await check();if(reason)return {refused:reason};
+  } catch(e){return {refused:'preflight actionability failed'};}
+  // Trial and dispatch are separate operations: this is NOT an atomic check+act.
+  // Any exception from this point can follow input dispatch and is UNKNOWN.
+  await locator.click({force:false,timeout:remaining()});
+  return {status:'ACTION_DISPATCHED',precondition_sha256:p.state_sha256,
+    clicked:true,destination:p.target.href};
+}"""
 
 
 class Refused(ValueError):
@@ -78,24 +144,33 @@ def _playwright_json(result):
     return parsed
 
 
+def _locator_opt_in(spec):
+    if (spec.get("computer_locator_tool") != "browser_run_code_unsafe"
+            or not isinstance(spec.get("trust_identity"), str) or not spec["trust_identity"]):
+        raise Refused("owner must review and pin the host locator tool")
+
+
 def playwright_observe(server, root, trace=None):
     """Fixed read-only observation for the bounded invoice adapter."""
     import mcp
     spec = getattr(server, "spec", {}) or {}
     if spec.get("atomic_browser_adapter") is not True:
         raise Refused("MCP server is not trusted for the atomic browser adapter")
+    _locator_opt_in(spec)
     try:
         mcp.validate_identity(spec)
     except ValueError as error:
         raise Refused(str(error)) from error
     started = time.monotonic()
-    result, how = mcp.computer_guarded_call(server, "browser_evaluate",
-        {"function": PLAYWRIGHT_OBSERVE}, root=root, fresh=True)
+    code = _HOST_OBSERVE % (PLAYWRIGHT_OBSERVE, json.dumps(secrets.token_hex(16)),
+                            json.dumps(secrets.token_hex(16)))
+    result, how = mcp.computer_guarded_call(server, "browser_run_code_unsafe",
+        {"code": code}, root=root, fresh=True)
     if trace is not None:
-        trace.append({"tool":"browser_evaluate", "how":how,
+        trace.append({"tool":"browser_run_code_unsafe", "how":how,
                       "error":bool((result or {}).get("isError")),
                       "seconds":round(time.monotonic()-started,3),
-                      "arguments":{"function":PLAYWRIGHT_OBSERVE}, "result":result})
+                      "arguments":{"code":code}, "result":result})
     if how != "live" or (result or {}).get("isError"):
         raise Unresolved("browser observation failed")
     parsed = _playwright_json(result)
@@ -105,7 +180,7 @@ def playwright_observe(server, root, trace=None):
 
 
 def playwright_atomic_click(server, root, preconditions, trace=None):
-    """Enforce one invoice target and click in one Playwright JavaScript turn.
+    """Bounded locator click; legacy name does not imply atomic check-and-act.
 
     The owner must opt this adapter into the MCP server's trusted identity.
     Network containment remains the server configuration's responsibility.
@@ -114,6 +189,7 @@ def playwright_atomic_click(server, root, preconditions, trace=None):
     spec = getattr(server, "spec", {}) or {}
     if spec.get("atomic_browser_adapter") is not True:
         raise Refused("MCP server is not trusted for the atomic browser adapter")
+    _locator_opt_in(spec)
     try:
         mcp.validate_identity(spec)
     except ValueError as error:
@@ -124,32 +200,21 @@ def playwright_atomic_click(server, root, preconditions, trace=None):
     remaining = p.pop("valid_for_seconds")
     if isinstance(remaining, bool) or not 0 < remaining <= 60:
         raise Refused("atomic browser deadline already expired")
+    target = p.get("target", {})
+    if not isinstance(target, dict) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", str(target.get("id", ""))):
+        raise Refused("invalid exact locator identity")
+    if not isinstance(p.get("binding"), dict):
+        raise Refused("missing host browser identity")
     deadline_epoch = int(time.time() * 1000 + remaining * 1000)
-    function = """() => {const p=%s, deadline=%d;
-      if(Date.now()>deadline)return {refused:'deadline'};
-      if(location.href!==p.page_url)return {refused:'page changed'};
-      if(document.querySelector('dialog[open],input[type=password]'))return {refused:'blocked state'};
-      const matches=Array.from(document.querySelectorAll('a[data-invoice]')).filter(a=>a.dataset.invoice===p.target.id);
-      if(matches.length!==1)return {refused:'target absent or ambiguous'};
-      const a=matches[0],r=a.getBoundingClientRect();
-      const current={id:a.dataset.invoice,href:a.href,text:a.textContent,
-        box:{x:r.x,y:r.y,width:r.width,height:r.height}};
-      const same=current.id===p.target.id&&current.href===p.target.href&&current.text===p.target.text&&
-        current.box.x===p.target.box.x&&current.box.y===p.target.box.y&&
-        current.box.width===p.target.box.width&&current.box.height===p.target.box.height;
-      if(!same)return {refused:'target changed',current,expected:p.target};
-      if(new URL(a.href).origin!==p.allowed_origin)return {refused:'destination changed'};
-      const destination=a.href;a.click();
-      return {precondition_sha256:p.state_sha256,clicked:true,destination};} """ % (
-          json.dumps(p, separators=(",", ":")), deadline_epoch)
+    code = _HOST_CLICK % (json.dumps(p, separators=(",", ":"), allow_nan=False), deadline_epoch)
     started = time.monotonic()
-    result, how = mcp.computer_guarded_call(server, "browser_evaluate",
-                                            {"function": function}, root=root, fresh=True)
+    result, how = mcp.computer_guarded_call(server, "browser_run_code_unsafe",
+                                            {"code": code}, root=root, fresh=True)
     if trace is not None:
-        trace.append({"tool": "browser_evaluate", "how": how,
+        trace.append({"tool": "browser_run_code_unsafe", "how": how,
                       "error": bool((result or {}).get("isError")),
                       "seconds": round(time.monotonic() - started, 3),
-                      "arguments": {"function": function}, "result": result})
+                      "arguments": {"code": code}, "result": result})
     if how in ("denied", "approval_required"):
         raise Refused("atomic browser adapter refused before action: " + how)
     if how != "live" or (result or {}).get("isError"):
@@ -159,11 +224,17 @@ def playwright_atomic_click(server, root, preconditions, trace=None):
         trace[-1]["atomic_result"] = parsed
     if parsed.get("refused"):
         raise Refused("atomic precondition refused: " + str(parsed["refused"]))
+    if parsed.get("status") != "ACTION_DISPATCHED" or parsed.get("clicked") is not True:
+        raise Unresolved("browser dispatch acknowledgment missing")
+    try:
+        parsed["post_observation"] = playwright_observe(server, root, trace)
+    except Exception as error:
+        raise Unresolved("click dispatched but post-observation failed; do not retry") from error
     return parsed
 
 
 class BrowserAuthority:
-    """Seal one-session observations and authorize one-use atomic adapter calls.
+    """Seal one-session observations and authorize one-use bounded adapter calls.
 
     This is an authority contract, not a browser implementation. The supplied
     adapter must enforce every precondition and return its receipt from the same
@@ -185,9 +256,14 @@ class BrowserAuthority:
         self._consumed = set()
         self._lock = threading.RLock()
 
-    def _state(self, state):
-        if not isinstance(state, dict) or set(state) != {"url", "title", "dialog", "expired", "links"}:
+    def _state(self, state, allow_empty=False):
+        if not isinstance(state, dict) or set(state) != {"url", "title", "dialog", "expired", "links", "binding"}:
             raise Refused("invalid browser observation shape")
+        binding = state["binding"]
+        if (not isinstance(binding, dict) or set(binding) != {"tab", "frame", "document"}
+                or any(not isinstance(binding[k], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", binding[k]) for k in ("tab", "frame"))
+                or type(binding["document"]) is not int or binding["document"] < 1):
+            raise Refused("invalid host browser identity")
         if not isinstance(state["title"], str) or len(state["title"]) > 500:
             raise Refused("invalid browser title")
         if type(state["dialog"]) is not bool or type(state["expired"]) is not bool:
@@ -197,7 +273,7 @@ class BrowserAuthority:
         if _origin(state["url"]) != self.allowed_origin:
             raise Refused("page is outside the allowed browser origin")
         links = state["links"]
-        if not isinstance(links, list) or not 1 <= len(links) <= MAX_INVOICES:
+        if not isinstance(links, list) or not (0 if allow_empty else 1) <= len(links) <= MAX_INVOICES:
             raise Refused("browser observation has no bounded targets")
         ids = set()
         for link in links:
@@ -269,6 +345,7 @@ class BrowserAuthority:
             preconditions = {"session": self.session_id,
                 "revision": receipt["revision"], "state_sha256": digest,
                 "page_url": state["url"], "target": targets[0],
+                "binding": state["binding"],
                 "allowed_origin": self.allowed_origin, "deadline": float(deadline),
                 "valid_for_seconds": float(deadline) - float(self.clock())}
             self._consumed.add(receipt["mac"])
@@ -276,23 +353,26 @@ class BrowserAuthority:
                 result = atomic_adapter(preconditions)
             except Refused:
                 # The trusted adapter contract permits this only when its
-                # atomic preconditions failed before the action.
+                # preflight predicates failed before input dispatch.
                 raise
             except Exception as error:
                 raise Unresolved("browser action outcome is unknown; do not retry") from error
             if (not isinstance(result, dict) or result.get("clicked") is not True
+                    or result.get("status") != "ACTION_DISPATCHED"
                     or result.get("precondition_sha256") != digest):
                 raise Unresolved("atomic adapter receipt does not prove the requested action")
             try:
                 destination = result["destination"]
                 if _origin(destination) != self.allowed_origin:
                     raise ValueError
+                post = self._state(result["post_observation"], allow_empty=True)
             except (KeyError, Refused, ValueError) as error:
                 raise Unresolved("browser action destination is not independently allowed") from error
-            return {"status":"VERIFIED_BROWSER_ACTION", "session":self.session_id,
+            return {"status":"ACTION_DISPATCHED", "session":self.session_id,
                     "revision":receipt["revision"], "target_id":target_id,
                     "destination":destination, "state_sha256":digest,
-                    "browser_authority_verified":True, "release_ready":False}
+                    "browser_authority_verified":True, "workflow_verified":False,
+                    "post_observation":post, "release_ready":False}
 
 
 def digest_manifest(manifest):
