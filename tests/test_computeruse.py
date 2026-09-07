@@ -129,6 +129,9 @@ class Artifacts(unittest.TestCase):
 
 class BrowserAuthority(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="browser-authority-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
         self.now = [100.0]
         self.auth = C.BrowserAuthority("http://portal.test", session_id="session-a",
                                        clock=lambda: self.now[0], max_age=5.0)
@@ -185,6 +188,42 @@ class BrowserAuthority(unittest.TestCase):
             self.auth.execute_click(receipt3,"INV-0",104.0,
                                     lambda p: (_ for _ in ()).throw(C.Refused("precondition changed")))
         print("[browser-action] exact preconditions execute once; uncertain adapter failure cannot retry")
+
+    def test_shipped_playwright_adapter_is_identity_bound_and_fail_closed(self):
+        receipt=self.auth.observe(self.state)
+        calls=[]
+        spec={"cmd":"fixture", "args":[], "atomic_browser_adapter":True,
+              "approval":"all", "no_approval":["browser_evaluate"],
+              "allow_tools":["browser_evaluate"]}
+        spec["trust_identity"]=mcp.server_identity(spec)
+        self.assertNotEqual(spec["trust_identity"],mcp.server_identity(dict(spec,atomic_browser_adapter=False)))
+        def reply(_name,args):
+            calls.append(args)
+            body=(self.state if args.get("function")==C.PLAYWRIGHT_OBSERVE else
+                  {"precondition_sha256":receipt["state_sha256"],"clicked":True,
+                   "destination":"http://portal.test/invoice/INV-0"})
+            return {"content":[{"type":"text","text":"### Result\n"+json.dumps(body)+"\n### Done"}]}
+        server=SimpleNamespace(name="fixture-browser",spec=spec,
+            tool_def=lambda name:{"name":name,"annotations":{"readOnlyHint":False}},call=reply)
+        _,how=mcp.guarded_call(server,"browser_evaluate",{"function":"() => document.title"},root=str(self.root),fresh=True)
+        self.assertEqual(how,"denied");self.assertEqual(calls,[])
+        self.assertEqual(C.playwright_observe(server,str(self.root)),self.state)
+        result=self.auth.execute_click(receipt,"INV-0",104.0,
+            lambda p:C.playwright_atomic_click(server,str(self.root),p))
+        self.assertTrue(result["browser_authority_verified"]);self.assertEqual(len(calls),2)
+        disabled_spec=dict(spec,atomic_browser_adapter=False)
+        disabled_spec["trust_identity"]=mcp.server_identity(disabled_spec)
+        disabled=SimpleNamespace(name="disabled",spec=disabled_spec,call=reply)
+        with self.assertRaises(C.Refused): C.playwright_observe(disabled,str(self.root))
+        with self.assertRaises(C.Refused): C.playwright_atomic_click(disabled,str(self.root),{"valid_for_seconds":1})
+        for payload,error in (({"refused":"target changed"},C.Refused),({},C.Unresolved)):
+            auth=C.BrowserAuthority("http://portal.test",clock=lambda:self.now[0])
+            rec=auth.observe(self.state)
+            bad=SimpleNamespace(name="bad",spec=spec,
+                tool_def=server.tool_def,call=lambda n,a,p=payload:{"content":[{"type":"text","text":"### Result\n"+json.dumps(p)+"\n### Done"}]})
+            with self.assertRaises(error):
+                auth.execute_click(rec,"INV-0",104.0,lambda p:C.playwright_atomic_click(bad,str(self.root),p))
+        print("[playwright-adapter] shipped atomic executor is identity-bound and refuses precondition or malformed readback")
 
 
 if __name__ == "__main__":

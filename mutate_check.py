@@ -53,6 +53,44 @@ MUTATIONS = [
      '            if _origin(link["href"]) != self.allowed_origin:',
      '            if False:',
      "test_computeruse.py", "off-origin browser targets must refuse"),
+    ("computer: untrusted atomic observation enabled", "computeruse.py",
+     'def playwright_observe(server, root, trace=None):\n'
+     '    """Fixed read-only observation for the bounded invoice adapter."""\n'
+     '    import mcp\n'
+     '    spec = getattr(server, "spec", {}) or {}\n'
+     '    if spec.get("atomic_browser_adapter") is not True:',
+     'def playwright_observe(server, root, trace=None):\n'
+     '    """Fixed read-only observation for the bounded invoice adapter."""\n'
+     '    import mcp\n'
+     '    spec = getattr(server, "spec", {}) or {}\n'
+     '    if False:',
+     "test_computeruse.py", "the shipped observation requires owner-bound enablement"),
+    ("computer: untrusted atomic action enabled", "computeruse.py",
+     'def playwright_atomic_click(server, root, preconditions, trace=None):\n'
+     '    """Enforce one invoice target and click in one Playwright JavaScript turn.\n\n'
+     '    The owner must opt this adapter into the MCP server\'s trusted identity.\n'
+     '    Network containment remains the server configuration\'s responsibility.\n'
+     '    """\n'
+     '    import mcp\n'
+     '    spec = getattr(server, "spec", {}) or {}\n'
+     '    if spec.get("atomic_browser_adapter") is not True:',
+     'def playwright_atomic_click(server, root, preconditions, trace=None):\n'
+     '    """Enforce one invoice target and click in one Playwright JavaScript turn.\n\n'
+     '    The owner must opt this adapter into the MCP server\'s trusted identity.\n'
+     '    Network containment remains the server configuration\'s responsibility.\n'
+     '    """\n'
+     '    import mcp\n'
+     '    spec = getattr(server, "spec", {}) or {}\n'
+     '    if False:',
+     "test_computeruse.py", "the shipped action requires owner-bound enablement"),
+    ("computer: adapter precondition refusal ignored", "computeruse.py",
+     '    if parsed.get("refused"):',
+     '    if False:',
+     "test_computeruse.py", "an adapter precondition refusal cannot become an action receipt"),
+    ("computer: raw browser evaluator bypass", "mcp.py",
+     '            and _authority is not _COMPUTER_AUTHORITY):',
+     '            and False):',
+     "test_computeruse.py", "an atomic-adapter server must deny direct evaluator calls"),
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',

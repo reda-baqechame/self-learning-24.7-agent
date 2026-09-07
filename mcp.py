@@ -53,7 +53,7 @@ def server_environment(spec, environ=None):
 def server_identity(spec):
     """Identity of owner-approved code/config, never the raw credential."""
     fields = ("cmd", "args", "shell", "version", "integrity", "source",
-              "env_allow", "env")
+              "env_allow", "env", "atomic_browser_adapter")
     blob = json.dumps({k: spec[k] for k in fields if k in spec},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -396,7 +396,16 @@ def _nullcontext():
     return nullcontext()
 
 
-def guarded_call(s, tool, arguments, root=None, fresh=False):
+_COMPUTER_AUTHORITY = object()
+
+
+def computer_guarded_call(s, tool, arguments, root=None, fresh=False):
+    """Platform computer adapter entry; not exposed by the MCP CLI."""
+    return guarded_call(s, tool, arguments, root=root, fresh=fresh,
+                        _authority=_COMPUTER_AUTHORITY)
+
+
+def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
     """tools/call through the owner's policy AND the effects ledger:
     denied tools never reach the server; identical calls inside one task
     lineage are replayed from the ledger instead of hitting the world twice
@@ -406,6 +415,12 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
         return {"isError": True, "content": [{"type": "text", "text":
                 f"tool '{tool}' is denied for server '{s.name}' by mcp.json "
                 f"policy"}]}, "denied"
+    spec = getattr(s, "spec", {}) or {}
+    if (spec.get("atomic_browser_adapter") is True and tool == "browser_evaluate"
+            and _authority is not _COMPUTER_AUTHORITY):
+        return {"isError": True, "content": [{"type": "text", "text":
+                "raw browser_evaluate is denied for an atomic-adapter server; "
+                "use the sealed computer authority path"}]}, "denied"
     # WHERE the tool is being pointed, not just WHICH tool it is.
     #
     # This function screened the tool NAME, the effects ledger and the risk
@@ -449,7 +464,6 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
                 return prior["result"], "replayed"
         # the human in the loop, as a mechanism: risky calls pause for the
         # owner and resume exactly once after approval
-        spec = getattr(s, "spec", {}) or {}
         risk = classify(spec, s.tool_def(tool))
         if needs_approval(spec, risk, tool):
             import approvals

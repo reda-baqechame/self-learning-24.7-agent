@@ -21,6 +21,11 @@ import fileauth
 
 MAX_INVOICES = 1000
 MAX_BYTES = 10_000_000
+PLAYWRIGHT_OBSERVE = """() => ({url:location.href, title:document.title,
+  dialog:!!document.querySelector('dialog[open]'), expired:!!document.querySelector('input[type=password]'),
+  links:Array.from(document.querySelectorAll('a[data-invoice]')).map(a=>{const r=a.getBoundingClientRect();return {
+    id:a.dataset.invoice,href:a.href,text:a.textContent,
+    box:{x:r.x,y:r.y,width:r.width,height:r.height}}})})"""
 
 
 class Refused(ValueError):
@@ -53,6 +58,108 @@ def _origin(value, configured=False):
         host = "[" + host + "]"
     default = (p.scheme == "http" and port in (None, 80)) or (p.scheme == "https" and port in (None, 443))
     return f"{p.scheme}://{host}" + ("" if default else f":{port}")
+
+
+def _playwright_json(result):
+    text = "\n".join(c.get("text", "") for c in (result or {}).get("content", [])
+                     if isinstance(c, dict))
+    match = re.search(r"### Result\s*\n(.*?)(?:\n### |\Z)", text, re.S)
+    if not match:
+        raise Unresolved("atomic browser adapter returned no structured result")
+    raw = match.group(1).strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\s*|\s*```$", "", raw)
+    try:
+        parsed = json.loads(raw)
+    except ValueError as error:
+        raise Unresolved("atomic browser adapter returned malformed JSON") from error
+    if not isinstance(parsed, dict):
+        raise Unresolved("atomic browser adapter returned a non-object result")
+    return parsed
+
+
+def playwright_observe(server, root, trace=None):
+    """Fixed read-only observation for the bounded invoice adapter."""
+    import mcp
+    spec = getattr(server, "spec", {}) or {}
+    if spec.get("atomic_browser_adapter") is not True:
+        raise Refused("MCP server is not trusted for the atomic browser adapter")
+    try:
+        mcp.validate_identity(spec)
+    except ValueError as error:
+        raise Refused(str(error)) from error
+    started = time.monotonic()
+    result, how = mcp.computer_guarded_call(server, "browser_evaluate",
+        {"function": PLAYWRIGHT_OBSERVE}, root=root, fresh=True)
+    if trace is not None:
+        trace.append({"tool":"browser_evaluate", "how":how,
+                      "error":bool((result or {}).get("isError")),
+                      "seconds":round(time.monotonic()-started,3),
+                      "arguments":{"function":PLAYWRIGHT_OBSERVE}, "result":result})
+    if how != "live" or (result or {}).get("isError"):
+        raise Unresolved("browser observation failed")
+    parsed = _playwright_json(result)
+    if trace is not None:
+        trace[-1]["observation"] = parsed
+    return parsed
+
+
+def playwright_atomic_click(server, root, preconditions, trace=None):
+    """Enforce one invoice target and click in one Playwright JavaScript turn.
+
+    The owner must opt this adapter into the MCP server's trusted identity.
+    Network containment remains the server configuration's responsibility.
+    """
+    import mcp
+    spec = getattr(server, "spec", {}) or {}
+    if spec.get("atomic_browser_adapter") is not True:
+        raise Refused("MCP server is not trusted for the atomic browser adapter")
+    try:
+        mcp.validate_identity(spec)
+    except ValueError as error:
+        raise Refused(str(error)) from error
+    if not isinstance(preconditions, dict) or not isinstance(preconditions.get("valid_for_seconds"), (int, float)):
+        raise Refused("invalid atomic browser preconditions")
+    p = dict(preconditions)
+    remaining = p.pop("valid_for_seconds")
+    if isinstance(remaining, bool) or not 0 < remaining <= 60:
+        raise Refused("atomic browser deadline already expired")
+    deadline_epoch = int(time.time() * 1000 + remaining * 1000)
+    function = """() => {const p=%s, deadline=%d;
+      if(Date.now()>deadline)return {refused:'deadline'};
+      if(location.href!==p.page_url)return {refused:'page changed'};
+      if(document.querySelector('dialog[open],input[type=password]'))return {refused:'blocked state'};
+      const matches=Array.from(document.querySelectorAll('a[data-invoice]')).filter(a=>a.dataset.invoice===p.target.id);
+      if(matches.length!==1)return {refused:'target absent or ambiguous'};
+      const a=matches[0],r=a.getBoundingClientRect();
+      const current={id:a.dataset.invoice,href:a.href,text:a.textContent,
+        box:{x:r.x,y:r.y,width:r.width,height:r.height}};
+      const same=current.id===p.target.id&&current.href===p.target.href&&current.text===p.target.text&&
+        current.box.x===p.target.box.x&&current.box.y===p.target.box.y&&
+        current.box.width===p.target.box.width&&current.box.height===p.target.box.height;
+      if(!same)return {refused:'target changed',current,expected:p.target};
+      if(new URL(a.href).origin!==p.allowed_origin)return {refused:'destination changed'};
+      const destination=a.href;a.click();
+      return {precondition_sha256:p.state_sha256,clicked:true,destination};} """ % (
+          json.dumps(p, separators=(",", ":")), deadline_epoch)
+    started = time.monotonic()
+    result, how = mcp.computer_guarded_call(server, "browser_evaluate",
+                                            {"function": function}, root=root, fresh=True)
+    if trace is not None:
+        trace.append({"tool": "browser_evaluate", "how": how,
+                      "error": bool((result or {}).get("isError")),
+                      "seconds": round(time.monotonic() - started, 3),
+                      "arguments": {"function": function}, "result": result})
+    if how in ("denied", "approval_required"):
+        raise Refused("atomic browser adapter refused before action: " + how)
+    if how != "live" or (result or {}).get("isError"):
+        raise Unresolved("atomic browser action result is unknown; do not retry")
+    parsed = _playwright_json(result)
+    if trace is not None:
+        trace[-1]["atomic_result"] = parsed
+    if parsed.get("refused"):
+        raise Refused("atomic precondition refused: " + str(parsed["refused"]))
+    return parsed
 
 
 class BrowserAuthority:
