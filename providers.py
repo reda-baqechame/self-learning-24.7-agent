@@ -19,8 +19,10 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import os
+import re
 import sys
 import tomllib
 import urllib.error
@@ -112,14 +114,42 @@ def detect(root=None):
 
 # ------------------------------------------------------------ settings i/o
 
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _key(value):
+    value = str(value)
+    return value if _BARE_KEY.fullmatch(value) else json.dumps(value, ensure_ascii=False)
+
+
 def _fmt(v):
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return str(v)
+    if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
+        return v.isoformat()
     if isinstance(v, list):
         return "[" + ", ".join(_fmt(x) for x in v) + "]"
-    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{_key(k)} = {_fmt(x)}"
+                                  for k, x in v.items()) + " }"
+    if not isinstance(v, str):
+        raise TypeError(f"unsupported TOML value: {type(v).__name__}")
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _emit_table(lines, path, table):
+    if path:
+        if lines:
+            lines.append("")
+        lines.append("[" + ".".join(_key(part) for part in path) + "]")
+    for key, value in table.items():
+        if not isinstance(value, dict):
+            lines.append(f"{_key(key)} = {_fmt(value)}")
+    for key, value in table.items():
+        if isinstance(value, dict):
+            _emit_table(lines, path + (key,), value)
 
 
 def load(root):
@@ -128,34 +158,13 @@ def load(root):
 
 
 def save(root, cfg):
-    """Write settings.toml from the parsed structure. The schema is ours and
-    small (tables of scalars, one nested table per provider, [agent.chain]),
-    so this round-trips safely — and it is written atomically."""
-    lines = ["# ----------------------------------------------------------------- agent",
-             "[agent]"]
-    agent = cfg.get("agent", {})
-    for k, v in agent.items():
-        if not isinstance(v, dict):
-            lines.append(f"{k} = {_fmt(v)}")
-    for k, v in agent.items():
-        if isinstance(v, dict):
-            lines += ["", f"[agent.{k}]"] + [f"{ik} = {_fmt(iv)}"
-                                             for ik, iv in v.items()]
-    lines += ["", "# ------------------------------------------------------------- providers",
-              "# Keys live in agent.env (api_key_env) — never in this file."]
-    for name, p in cfg.get("providers", {}).items():
-        lines += ["", f"[providers.{name}]"]
-        for k, v in p.items():
-            if not isinstance(v, dict):
-                lines.append(f"{k} = {_fmt(v)}")
-        for k, v in p.items():
-            if isinstance(v, dict):
-                lines += [f"[providers.{name}.{k}]"] + [f"{ik} = {_fmt(iv)}"
-                                                        for ik, iv in v.items()]
-    lines += ["", "# ----------------------------------------------------------------- roles"]
-    for name, r in cfg.get("roles", {}).items():
-        lines += ["", f"[roles.{name}]"] + [f"{k} = {_fmt(v)}"
-                                            for k, v in r.items()]
+    """Atomically write every parsed setting, including arbitrary roots and
+    nested tables.  Provider operations may change their requested fields;
+    they must not reinterpret or discard unrelated configuration."""
+    if not isinstance(cfg, dict):
+        raise TypeError("settings root must be a table")
+    lines = []
+    _emit_table(lines, (), cfg)
     text = "\n".join(lines) + "\n"
     # validate before replacing: a broken settings.toml would stop the expert
     tomllib.loads(text)

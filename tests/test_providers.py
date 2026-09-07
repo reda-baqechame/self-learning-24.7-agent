@@ -59,6 +59,22 @@ def main():
                              'ripper = "watcher"'),
                       role_tools={"tester": ["write_file"]})
 
+    # Provider and role edits are narrow operations.  Unrelated root tables
+    # and arbitrarily deep settings must survive them as the same TOML data,
+    # rather than merely leaving behind syntax that tomllib can parse.
+    with open(os.path.join(sb, "settings.toml"), "a", encoding="utf-8") as f:
+        f.write('''
+[agent.http_endpoints.tickets]
+base = "https://api.example.test/v1"
+methods = ["GET", "POST"]
+[agent.memory_router.examiner]
+include = ["lesson", "failure"]
+[acquire]
+mode = "strict"
+[acquire.versions]
+policy = "v1"
+''')
+
     # --- 1. adding providers, and a lossless settings round-trip
     before = P.load(sb)
     P.add(sb, "openrouter")                       # known rail, by name alone
@@ -77,6 +93,9 @@ def main():
     assert cfg["agent"]["chain"]["ripper"] == "watcher"
     assert cfg["roles"]["tester"]["tools"] == ["write_file"]
     assert cfg["providers"]["m"]["type"] == "mock"
+    assert cfg["agent"]["http_endpoints"] == before["agent"]["http_endpoints"]
+    assert cfg["agent"]["memory_router"] == before["agent"]["memory_router"]
+    assert cfg["acquire"] == before["acquire"]
     assert before["agent"]["poll_interval_seconds"] == \
         cfg["agent"]["poll_interval_seconds"]
     raw = open(os.path.join(sb, "settings.toml"), encoding="utf-8").read()
