@@ -76,6 +76,7 @@ blocker may resume it to running.
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import threading
@@ -105,6 +106,46 @@ MAX_ACCEPT = 12          # a goal needing more checks than this is several goals
 
 class ContractError(Exception):
     pass
+
+
+def validate_budget_limit(value, name, *, whole=False, positive=False):
+    """Return one canonical limit or refuse it before contract state exists.
+
+    JSON, CLI and direct Python callers all arrive here. ``float('nan')`` and
+    infinity compare strangely enough to bypass ordinary range checks, while
+    bool is an int in Python; both are invalid owner limits.
+    """
+    if value is None or isinstance(value, bool):
+        raise ContractError(f"{name} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ContractError(f"{name} must be a number") from None
+    if not math.isfinite(number):
+        raise ContractError(f"{name} must be finite")
+    if whole and not number.is_integer():
+        raise ContractError(f"{name} must be a whole number")
+    if number < 0 or (positive and number <= 0):
+        qualifier = "greater than zero" if positive else "zero or greater"
+        raise ContractError(f"{name} must be {qualifier}")
+    return int(number) if whole else number
+
+
+def validate_acceptance(accept):
+    """Validate and copy the frozen graders before any contract write."""
+    if accept is None:
+        return []
+    if not isinstance(accept, (list, tuple)):
+        raise ContractError("acceptance must be a list")
+    out = list(accept)
+    if len(out) > MAX_ACCEPT:
+        raise ContractError(
+            f"{len(out)} acceptance tests; more than {MAX_ACCEPT} means "
+            f"this is several goals wearing one id — split it")
+    for a in out:
+        if not isinstance(a, dict) or not a.get("check"):
+            raise ContractError(f"malformed acceptance entry: {a!r}")
+    return out
 
 
 # ------------------------------------------------------------------- paths
@@ -260,22 +301,19 @@ def create(root, gid, goal, criteria="", accept=None, non_goals="",
            max_usd=0.0, max_minutes=0, max_cycles=4):
     """Write the contract, in `draft`. Freezing is a separate, explicit act
     so a caller can review what is about to become the definition of done."""
-    accept = list(accept or [])
-    if len(accept) > MAX_ACCEPT:
-        raise ContractError(
-            f"{len(accept)} acceptance tests; more than {MAX_ACCEPT} means "
-            f"this is several goals wearing one id — split it")
-    for a in accept:
-        if not isinstance(a, dict) or not a.get("check"):
-            raise ContractError(f"malformed acceptance entry: {a!r}")
+    accept = validate_acceptance(accept)
+    max_usd = validate_budget_limit(max_usd, "max_usd")
+    max_minutes = validate_budget_limit(max_minutes, "max_minutes", whole=True)
+    max_cycles = validate_budget_limit(max_cycles, "max_cycles", whole=True,
+                                       positive=True)
     c = {
         "gid": str(gid), "version": 1,
         "goal": str(goal), "criteria": str(criteria or ""),
         "non_goals": str(non_goals or ""),
         "acceptance": accept,
-        "budget": {"max_usd": float(max_usd or 0.0),
-                   "max_minutes": int(max_minutes or 0),
-                   "max_cycles": int(max_cycles or 4)},
+        "budget": {"max_usd": max_usd,
+                   "max_minutes": max_minutes,
+                   "max_cycles": max_cycles},
         "state": "draft", "state_why": "",
         "accept_hash": None, "sealed": None,
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -784,16 +784,28 @@ def start_goal(home, slug, root, goal_text, gid=None, cycles=4, criteria=None,
     `accept` is the list of frozen acceptance tests ('what::command' each) —
     the graders the worker cannot write. Passing them here is how a goal
     started from the panel can end VERIFIED rather than merely achieved."""
+    import contract as contractmod
+    try:
+        accept = contractmod.validate_acceptance(accept)
+        max_usd = contractmod.validate_budget_limit(max_usd, "max_usd")
+        max_minutes = contractmod.validate_budget_limit(
+            max_minutes, "max_minutes", whole=True)
+        cycles = contractmod.validate_budget_limit(
+            cycles, "cycles", whole=True, positive=True)
+    except contractmod.ContractError as e:
+        raise ValueError(str(e)) from None
     gid = gid or time.strftime("g-%Y%m%d-%H%M%S")
     if not re.fullmatch(r"[\w.-]{1,64}", gid):
         raise ValueError("invalid goal id")
     cmd = [sys.executable, os.path.join(HOME, "goal.py"), "pursue",
            goal_text, "--expert", slug, "--home", home,
-           "--id", gid, "--drive", "--cycles", str(int(cycles or 4))]
+           "--id", gid, "--drive", "--cycles", str(cycles)]
     if criteria:
         cmd += ["--criteria", criteria]
-    for a in (accept or []):
-        cmd += ["--accept", str(a)]
+    for a in accept:
+        # goal.py's terminal grammar remains what::command. These values are
+        # already catalogue-built and carry no caller-authored command text.
+        cmd += ["--accept", f"{a['what']}::{a['check']}"]
     if max_usd:
         cmd += ["--max-usd", str(float(max_usd))]
     if max_minutes:
@@ -827,6 +839,55 @@ def _net_gate(spec):
             "gate instead, e.g. {\"gate\": \"exists\", \"path\": \"out/x.html\"}. "
             "The catalogue is at GET /api/gates.")
     return gates.build(spec)
+
+
+def _net_acceptance(specs):
+    """Build frozen goal graders from the same closed network catalogue.
+
+    The CLI deliberately accepts shell checks from a terminal operator. HTTP
+    callers name a gate; no field from the request becomes executable text.
+    """
+    import contract as contractmod
+    import gates
+    if specs is None:
+        return []
+    if not isinstance(specs, list):
+        raise ValueError("acceptance must be a list of named gate objects")
+    if len(specs) > contractmod.MAX_ACCEPT:
+        raise ValueError(f"at most {contractmod.MAX_ACCEPT} acceptance gates")
+    out = []
+    for i, spec in enumerate(specs, 1):
+        if not isinstance(spec, dict):
+            raise ValueError("goal acceptance over the network must name a gate")
+        check = _net_gate(spec)
+        if not check:
+            raise ValueError("an acceptance gate cannot be empty")
+        name = str(spec.get("gate") or "").strip().lower()
+        what = str(spec.get("what") or gates.CATALOGUE[name]["what"]).strip()
+        if not what:
+            raise ValueError("state what the acceptance gate proves")
+        out.append({"id": f"A{i}", "what": what[:300], "check": check})
+    return out
+
+
+def _goal_request(data):
+    """Validate every launch input before a resolver, write or process runs."""
+    import contract as contractmod
+    d = data if isinstance(data, dict) else {}
+    try:
+        return {
+            "accept": _net_acceptance(d.get("accept")),
+            "max_usd": contractmod.validate_budget_limit(
+                d["max_usd"] if "max_usd" in d else 0.0, "max_usd"),
+            "max_minutes": contractmod.validate_budget_limit(
+                d["max_minutes"] if "max_minutes" in d else 0,
+                "max_minutes", whole=True),
+            "cycles": contractmod.validate_budget_limit(
+                d["cycles"] if "cycles" in d else 4, "cycles",
+                whole=True, positive=True),
+        }
+    except contractmod.ContractError as e:
+        raise ValueError(str(e)) from None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1158,16 +1219,16 @@ class Handler(BaseHTTPRequestHandler):
             return {"role": d["role"], "config": r}
         if action == "goal":
             try:
+                request = _goal_request(self._data)
                 gid = start_goal(self.home, slug, root, self._data["goal"],
                                  self._data.get("id"),
-                                 self._data.get("cycles") or 4,
+                                 request["cycles"],
                                  self._data.get("criteria"),
-                                 accept=[str(a) for a in
-                                         (self._data.get("accept") or [])][:12],
-                                 max_usd=float(self._data.get("max_usd")
-                                               or 0.0))
+                                 accept=request["accept"],
+                                 max_usd=request["max_usd"],
+                                 max_minutes=request["max_minutes"])
             except ValueError as e:
-                return {"error": str(e)}
+                return {"error": str(e), "_status": 400}
             return {"pursuing": gid}
         if action == "template":
             return apply_template(root, slug, self._data["template"])
@@ -2265,6 +2326,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._fail({"error": f"no expert '{slug}'"}, 404)
                     return
                 criteria = (d.get("criteria") or "").strip()
+                # Parse every launch constraint before universal.resolve:
+                # apply=True may persist acquisitions, so an invalid budget
+                # or grader must stop before the resolver changes anything.
+                request = _goal_request(d)
                 plan = universal.resolve(self.home, slug, want, criteria,
                                          apply=bool(d.get("learn", True)))
                 if plan.get("needs_owner"):
@@ -2280,20 +2345,19 @@ class Handler(BaseHTTPRequestHandler):
                                      "authority is the one gap a machine must "
                                      "not resolve for itself."})
                     return
-                accept = [str(a) for a in (d.get("accept") or [])][:12]
                 gid = start_goal(self.home, slug, root, want,
-                                 cycles=d.get("cycles") or 4,
+                                 cycles=request["cycles"],
                                  criteria=criteria or None,
-                                 accept=accept,
-                                 max_usd=float(d.get("max_usd") or 0.0),
-                                 max_minutes=int(d.get("max_minutes") or 0))
+                                 accept=request["accept"],
+                                 max_usd=request["max_usd"],
+                                 max_minutes=request["max_minutes"])
                 self._json({"started": True, "goal_id": gid,
                             "verdict": plan.get("verdict"),
                             "actions": plan.get("actions") or [],
-                            "acceptance": len(accept),
+                            "acceptance": len(request["accept"]),
                             "message": f"resolved what could be resolved, "
                                        f"then started {gid}"
-                                       + ("" if accept else
+                                       + ("" if request["accept"] else
                                           " — no acceptance tests were "
                                           "given, so the outcome can be "
                                           "achieved but never VERIFIED")})

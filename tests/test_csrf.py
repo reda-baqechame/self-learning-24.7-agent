@@ -135,6 +135,21 @@ def main():
         print("[gates] a named gate becomes the command; a traversing "
               "parameter inside one is still refused")
 
+        # Goal contracts are just as executable as task done-checks. The
+        # browser must name catalogue gates here too; pairing the hostile
+        # grader with another malformed field proves the error names the
+        # grader and happens before a process can be launched.
+        goal_dir = os.path.join(home, "experts", "legit", "goals")
+        code, r = call("POST", "/api/experts/legit/goal", {
+            "goal": "write a report",
+            "accept": ["report exists::python -c 'print(1)'"],
+            "max_usd": "5oops"}, SAME)
+        assert code == 400 and "name a gate" in json.dumps(r), (code, r)
+        assert not os.path.exists(goal_dir), (
+            "a refused goal request wrote state or launched goal.py")
+        print("[goal-rce] goal acceptance over HTTP also requires named gates; "
+              "a raw command is refused before any goal state exists")
+
         # --- 5. the catalogue is discoverable, so the panel can offer it
         code, r = call("GET", "/api/gates")
         assert code == 200 and {g["gate"] for g in r["gates"]} >= {

@@ -21,6 +21,18 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("panel goal: raw network grader accepted", "ui.py",
+     '''        if not isinstance(spec, dict):
+            raise ValueError("goal acceptance over the network must name a gate")''',
+     '''        if not isinstance(spec, dict):
+            spec = {"gate": "exists", "path": "out/x"}''',
+     "test_ledger_defects.py", "network acceptance accepted"),
+
+    ("goal budget: nonfinite limit accepted", "contract.py",
+     '    if not math.isfinite(number):',
+     '    if False:',
+     "test_ledger_defects.py", "invalid goal limit was accepted"),
+
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',

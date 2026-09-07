@@ -34,6 +34,7 @@ from common import AGENT_DIR, PY
 
 sys.path.insert(0, AGENT_DIR)
 import doctor                   # noqa: E402
+import contract                 # noqa: E402
 import federation               # noqa: E402
 import fileauth                 # noqa: E402
 import harness                  # noqa: E402
@@ -97,9 +98,70 @@ def check_panel_names_a_gate():
         assert "free-form" in str(exc), exc
     else:
         raise AssertionError("a raw string must still be refused")
+
+    accepted = ui._net_acceptance([
+        {"gate": "exists", "path": "out/report.md",
+         "what": "the report exists"},
+        {"gate": "verify", "course": "onboarding"},
+    ])
+    assert [a["id"] for a in accepted] == ["A1", "A2"], accepted
+    assert accepted[0]["what"] == "the report exists", accepted[0]
+    assert "out/report.md" in accepted[0]["check"], accepted[0]
+    assert "onboarding" in accepted[1]["check"], accepted[1]
+    for bad in (
+            ["report exists::python -c 'print(1)'"],
+            {"gate": "exists", "path": "out/x"},
+            [{"gate": "exists", "path": "out/x"}] * 13):
+        try:
+            ui._net_acceptance(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"network acceptance accepted {bad!r}")
     print("[panel] the task dialog names a gate from the catalogue (exists, "
           "designcheck, citecheck, verify, memcheck) with one parameter; "
-          "the object it posts builds a command and a raw string is refused")
+          "goal graders use the same catalogue, preserve owner-facing meaning, "
+          "and raw, malformed, or excess graders are refused")
+
+
+def check_goal_limits_are_finite_before_work():
+    parsed = ui._goal_request({
+        "accept": [{"gate": "exists", "path": "out/report.md"}],
+        "max_usd": "1.25", "max_minutes": "10", "cycles": 3})
+    assert parsed["max_usd"] == 1.25 and parsed["max_minutes"] == 10, parsed
+    assert parsed["cycles"] == 3 and len(parsed["accept"]) == 1, parsed
+    assert ui._goal_request({}) == {
+        "accept": [], "max_usd": 0.0, "max_minutes": 0, "cycles": 4}
+
+    invalid = (
+        {"max_usd": None}, {"max_usd": True}, {"max_usd": "5oops"},
+        {"max_usd": "nan"}, {"max_usd": float("inf")}, {"max_usd": -0.01},
+        {"max_minutes": 1.5}, {"max_minutes": -1},
+        {"cycles": 0}, {"cycles": 2.5}, {"cycles": False},
+    )
+    for body in invalid:
+        try:
+            ui._goal_request(body)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid goal limit was accepted: {body!r}")
+
+    # The contract is a second boundary for CLI and direct callers. A bad
+    # limit must fail before a contract directory or event is written.
+    for value in (float("nan"), float("inf"), -1, True):
+        with tempfile.TemporaryDirectory(prefix="goal-limit-") as root:
+            try:
+                contract.create(root, "g-bad", "goal", max_usd=value)
+            except contract.ContractError:
+                pass
+            else:
+                raise AssertionError(f"contract accepted max_usd={value!r}")
+            assert not os.path.exists(os.path.join(root, "goals")), (
+                "an invalid budget wrote goal state before refusing")
+    print("[goal-input] goal spend, time and cycle limits are finite and in "
+          "range before any state is written; zero retains its documented "
+          "no-extra-cap meaning")
 
 
 # ---------------------------------------------------------------- 3 invite
@@ -221,6 +283,7 @@ def check_prose_matches_the_tree():
 def main():
     check_doctor_reports_import_failures()
     check_panel_names_a_gate()
+    check_goal_limits_are_finite_before_work()
     check_invite_posts_no_actor()
     check_subquery_purpose_is_declared()
     check_case_ledger_is_control()
