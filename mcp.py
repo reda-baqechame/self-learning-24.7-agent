@@ -13,10 +13,12 @@ Tool results are fenced as untrusted data, not instructions.
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -568,8 +570,6 @@ def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
     return result, "live"
 
 
-_IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
-            "image/webp": ".webp", "image/gif": ".gif"}
 _MAX_BLOB_BYTES = 25_000_000
 _MAX_DIMENSION_SCAN = 65_536
 
@@ -641,6 +641,116 @@ def _image_dimensions(raw, mime):
     return None, None
 
 
+def _image_info(raw):
+    """Derive canonical type, safe extension, and dimensions from bytes."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime, ext = "image/png", ".png"
+    elif raw.startswith(b"\xff\xd8"):
+        mime, ext = "image/jpeg", ".jpg"
+    elif (len(raw) >= 12 and raw[:4] == b"RIFF"
+          and raw[8:12] == b"WEBP"):
+        mime, ext = "image/webp", ".webp"
+    elif raw.startswith((b"GIF87a", b"GIF89a")):
+        mime, ext = "image/gif", ".gif"
+    else:
+        return None
+    width, height = _image_dimensions(raw, mime)
+    return mime, ext, width, height
+
+
+def _artifact_directory(root):
+    """Create and return the physical, unredirected expert-local directory."""
+    import fileauth
+    root_real = os.path.realpath(root or ".")
+    rel = "tmp/mcp-artifacts"
+    expected = os.path.join(root_real, "tmp", "mcp-artifacts")
+
+    def resolved():
+        got = fileauth.resolve(root_real, rel, "write", "harness",
+                               allow_zones={fileauth.ZONE_ROOT})
+        if os.path.normcase(os.path.abspath(got)) != \
+                os.path.normcase(os.path.abspath(expected)):
+            raise fileauth.Denied("MCP artifact directory is redirected")
+
+    resolved()
+    os.makedirs(expected, exist_ok=True)
+    resolved()  # catch a parent redirect installed during creation
+    for path in (os.path.join(root_real, "tmp"), expected):
+        info = os.lstat(path)
+        is_junction = getattr(os.path, "isjunction", lambda _p: False)(path)
+        if (not stat.S_ISDIR(info.st_mode) or os.path.islink(path)
+                or is_junction):
+            raise fileauth.Denied("MCP artifact directory is redirected")
+    info = os.lstat(expected)
+    return expected, (info.st_dev, info.st_ino)
+
+
+def _stable_artifact_directory(root, path, identity):
+    """Re-resolve after race windows and require the same real directory."""
+    import fileauth
+    try:
+        current, current_identity = _artifact_directory(root)
+    except (OSError, fileauth.Denied):
+        return False
+    return (os.path.normcase(current) == os.path.normcase(path)
+            and current_identity == identity)
+
+
+def _read_immutable_target(path, raw):
+    """Read only one stable, regular, singly-linked existing digest target."""
+    try:
+        before = os.lstat(path)
+        is_junction = getattr(os.path, "isjunction", lambda _p: False)(path)
+        if (not stat.S_ISREG(before.st_mode) or os.path.islink(path)
+                or is_junction or before.st_nlink != 1):
+            return False
+        with open(path, "rb") as f:
+            opened = os.fstat(f.fileno())
+            data = f.read(len(raw) + 1)
+        after = os.lstat(path)
+    except OSError:
+        return False
+    identities = {(s.st_dev, s.st_ino) for s in (before, opened, after)}
+    return (len(identities) == 1 and stat.S_ISREG(opened.st_mode)
+            and opened.st_nlink == 1 and after.st_nlink == 1 and data == raw)
+
+
+def _remove_published_alias(path, temporary):
+    """Remove only the just-linked alias when a directory race is detected."""
+    try:
+        target_info = os.lstat(path)
+        temp_info = os.lstat(temporary)
+        if ((target_info.st_dev, target_info.st_ino) ==
+                (temp_info.st_dev, temp_info.st_ino)
+                and stat.S_ISREG(target_info.st_mode)
+                and target_info.st_nlink >= 2):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _publication_directory(root, path, identity):
+    """Anchor POSIX publication; require Windows identity revalidation."""
+    if os.name == "nt":
+        if not _stable_artifact_directory(root, path, identity):
+            raise OSError("MCP artifact directory changed before publication")
+        yield None
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        opened = os.fstat(directory_fd)
+        if ((opened.st_dev, opened.st_ino) != identity
+                or not _stable_artifact_directory(root, path, identity)):
+            raise OSError("MCP artifact directory changed before publication")
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
+
+
 def _save_blob(root, c, n):
     """Store a non-text block as an immutable expert-local artifact.
 
@@ -662,30 +772,43 @@ def _save_blob(root, c, n):
     saying what was withheld rather than pretending.
     """
     import base64
+    import fileauth
     data = c.get("data") or c.get("blob")
     if not data or not isinstance(data, str):
         return None
-    mime = str(c.get("mimeType") or c.get("mime_type") or "").strip().lower()
-    ext = _IMG_EXT.get(mime, ".bin")
+    encoded_size = len(data)
+    if encoded_size % 4:
+        return None
+    padding = int(data.endswith("=")) + int(data.endswith("=="))
+    if encoded_size // 4 * 3 - padding > _MAX_BLOB_BYTES:
+        return None
     try:
         raw = base64.b64decode(data, validate=True)
     except Exception:
         return None
     if not raw or len(raw) > _MAX_BLOB_BYTES:  # a tool result is untrusted input
         return None
+    image = _image_info(raw)
+    if image is None:
+        return None
+    mime, ext, width, height = image
+    declared = str(c.get("mimeType") or c.get("mime_type") or "").strip().lower()
+    if declared == "image/jpg":
+        declared = "image/jpeg"
+    if declared and declared != mime:
+        return None
     digest = hashlib.sha256(raw).hexdigest()
     name = digest + ext
     rel = f"tmp/mcp-artifacts/{name}"
-    d = os.path.join(root or ".", "tmp", "mcp-artifacts")
-    path = os.path.join(d, name)
-    width, height = _image_dimensions(raw, mime)
     metadata = {"path": rel, "sha256": digest, "bytes": len(raw),
-                "mime": mime or "unknown", "width": width, "height": height}
+                "mime": mime, "width": width, "height": height}
     try:
-        os.makedirs(d, exist_ok=True)
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                return metadata if f.read(len(raw) + 1) == raw else None
+        d, directory_identity = _artifact_directory(root)
+        path = os.path.join(d, name)
+        if os.path.lexists(path):
+            return metadata if (_stable_artifact_directory(
+                root, d, directory_identity) and
+                _read_immutable_target(path, raw)) else None
         import tempfile
         fd, temporary = tempfile.mkstemp(prefix=f".{digest}-", suffix=".tmp",
                                          dir=d)
@@ -694,26 +817,63 @@ def _save_blob(root, c, n):
                 f.write(raw)
                 f.flush()
                 os.fsync(f.fileno())
-            try:
-                # A hard-link publication is atomic and cannot replace a path
-                # another writer published after our existence check.
-                os.link(temporary, path)
-            except FileExistsError:
-                with open(path, "rb") as f:
-                    if f.read(len(raw) + 1) != raw:
+            temp_info = os.lstat(temporary)
+            if (not stat.S_ISREG(temp_info.st_mode) or temp_info.st_nlink != 1
+                    or not _stable_artifact_directory(
+                        root, d, directory_identity)):
+                return None
+            with _publication_directory(root, d, directory_identity) as dir_fd:
+                try:
+                    try:
+                        # A hard-link publication is atomic and cannot replace
+                        # a name another writer published first. POSIX anchors
+                        # both names to the validated directory descriptor;
+                        # Windows immediately revalidates and removes only the
+                        # just-linked alias if a parent changed meanwhile.
+                        if dir_fd is None:
+                            os.link(temporary, path)
+                            target_info = os.lstat(path)
+                        else:
+                            os.link(os.path.basename(temporary), name,
+                                    src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
+                                    follow_symlinks=False)
+                            target_info = os.stat(
+                                name, dir_fd=dir_fd, follow_symlinks=False)
+                    except FileExistsError:
+                        return metadata if (_stable_artifact_directory(
+                            root, d, directory_identity) and
+                            _read_immutable_target(path, raw)) else None
+                    if ((target_info.st_dev, target_info.st_ino) !=
+                            (temp_info.st_dev, temp_info.st_ino)
+                            or not _stable_artifact_directory(
+                                root, d, directory_identity)):
+                        _remove_published_alias(path, temporary)
                         return None
+                finally:
+                    try:
+                        if dir_fd is None:
+                            os.unlink(temporary)
+                        else:
+                            os.unlink(os.path.basename(temporary), dir_fd=dir_fd)
+                        temporary = None
+                    except FileNotFoundError:
+                        pass
         finally:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-    except OSError:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+        if not (_stable_artifact_directory(root, d, directory_identity)
+                and _read_immutable_target(path, raw)):
+            return None
+    except (OSError, fileauth.Denied):
         return None
     return metadata
 
 
-def render_result(result, root=None):
-    """Flatten an MCP tool result to fenced text. isError stays loud."""
+def render_result(result, root=None, artifacts=None):
+    """Flatten a result; optionally retain artifact metadata independently."""
     parts = []
     for i, c in enumerate(result.get("content", [])):
         if c.get("type") == "text":
@@ -721,6 +881,8 @@ def render_result(result, root=None):
         else:
             saved = _save_blob(root, c, i)
             if saved:
+                if artifacts is not None:
+                    artifacts.append(dict(saved))
                 rel = saved["path"]
                 metadata = json.dumps(saved, separators=(",", ":"))
                 parts.append(

@@ -41,15 +41,34 @@ MUTATIONS = [
      '    name = digest + ext',
      '    name = "artifact" + ext',
      "test_mcp.py", "different literal image bytes must retain distinct SHA-256 paths"),
-    ("mcp image: same-path overwrite accepted", "mcp.py",
-     '        if os.path.exists(path):\n'
-     '            with open(path, "rb") as f:\n'
-     '                return metadata if f.read(len(raw) + 1) == raw else None',
-     '        if os.path.exists(path):\n'
-     '            with open(path, "wb") as f:\n'
-     '                f.write(raw)\n'
+    ("mcp image: existing digest validation bypassed", "mcp.py",
+     '        if os.path.lexists(path):\n'
+     '            return metadata if (_stable_artifact_directory(\n'
+     '                root, d, directory_identity) and\n'
+     '                _read_immutable_target(path, raw)) else None',
+     '        if os.path.lexists(path):\n'
      '            return metadata',
-     "test_mcp.py", "identical bytes must deduplicate without rewriting the artifact"),
+     "test_mcp.py", "linked or swapped existing digest targets must refuse"),
+    ("mcp image: directory race recheck removed", "mcp.py",
+     '        current, current_identity = _artifact_directory(root)',
+     '        return True',
+     "test_mcp.py", "a redirected artifact directory must fail closed after creation"),
+    ("mcp image: raced publication cleanup removed", "mcp.py",
+     '                        _remove_published_alias(path, temporary)',
+     '                        pass',
+     "test_mcp.py", "a last-moment directory swap must leave no outside digest"),
+    ("mcp image: structured artifact sink dropped", "mcp.py",
+     '                    artifacts.append(dict(saved))',
+     '                    pass',
+     "test_mcp.py", "artifact metadata must survive flattened display truncation"),
+    ("mcp image: declaration conflict accepted", "mcp.py",
+     '    if declared and declared != mime:',
+     '    if False:',
+     "test_mcp.py", "mislabeled image bytes must not claim the declared MIME"),
+    ("mcp image: encoded allocation bound removed", "mcp.py",
+     '    if encoded_size // 4 * 3 - padding > _MAX_BLOB_BYTES:',
+     '    if False:',
+     "test_mcp.py", "oversized encoded input must refuse before base64 decoding"),
     ("computer: browser selector misclassified as URL", "mcp.py",
      '        looks_urlish = ((str(k).lower() in _URL_KEYS and not selector_target)',
      '        looks_urlish = ((str(k).lower() in _URL_KEYS)',
