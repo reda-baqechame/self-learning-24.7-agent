@@ -249,6 +249,89 @@ def image_existing_target_swap_race():
           "during read fails closed")
 
 
+def image_existing_parent_redirect_at_open():
+    """Move tmp out and junction it back while the existing target opens."""
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-parent-move-")
+    outside = tempfile.mkdtemp(prefix="mcp-parent-move-outside-")
+    tmp_dir = os.path.join(root, "tmp")
+    artifact_dir = os.path.join(tmp_dir, "mcp-artifacts")
+    moved_tmp = os.path.join(outside, "moved-tmp")
+    os.makedirs(artifact_dir)
+    target = os.path.join(
+        artifact_dir,
+        "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png")
+    with open(target, "wb") as f:
+        f.write(raw)
+    real_open = builtins.open
+    moved = []
+
+    def moving_open(path, mode="r", *args, **kwargs):
+        if (not moved and mode == "rb"
+                and os.path.normcase(os.path.abspath(path)) ==
+                    os.path.normcase(os.path.abspath(target))):
+            os.rename(tmp_dir, moved_tmp)
+            moved.append(_redirect_directory(tmp_dir, moved_tmp))
+        return real_open(path, mode, *args, **kwargs)
+
+    builtins.open = moving_open
+    try:
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(raw).decode("ascii")}]}, root)
+    finally:
+        builtins.open = real_open
+    assert moved, "test did not move and redirect the parent during target open"
+    assert "content omitted" in rendered and "saved to" not in rendered, \
+        "same-inode target outside a redirected parent was returned as local"
+    moved_target = os.path.join(moved_tmp, "mcp-artifacts", os.path.basename(target))
+    with open(moved_target, "rb") as f:
+        assert f.read() == raw
+    print(f"[mcp-return-gate] parent move/{moved[0]} during existing target "
+          f"open is refused after byte verification")
+
+
+def wav_artifact():
+    wav = bytes.fromhex(
+        "524946462400000057415645666d74201000000001000100401f0000401f0000"
+        "010008006461746100000000")
+    wav_sha = "5b517b506f635e251ee0d7020062f1ce375cc3a92f1f445e71be6995f4a591f1"
+    wav_expected = {
+        "path": f"tmp/mcp-artifacts/{wav_sha}.wav", "sha256": wav_sha,
+        "bytes": 44, "mime": "audio/wav", "width": None, "height": None,
+    }
+    wav_root = tempfile.mkdtemp(prefix="mcp-wav-")
+    wav_saved = mcp._save_blob(
+        wav_root,
+        {"type": "audio", "mimeType": "audio/wav",
+         "data": base64.b64encode(wav).decode("ascii")}, 0)
+    assert wav_saved == wav_expected, "valid WAV evidence was discarded"
+    with open(os.path.join(wav_root, *wav_expected["path"].split("/")), "rb") as f:
+        assert f.read() == wav
+    print("[mcp-binary] literal WAV retains canonical .wav/audio metadata")
+
+
+def generic_binary_artifact():
+    generic = bytes.fromhex("000102626c6f62ff")
+    generic_sha = "626a57d7c9a3afc67e22c1d5f461d462282bb06211bb4a0275d22030f080617c"
+    generic_expected = {
+        "path": f"tmp/mcp-artifacts/{generic_sha}.bin", "sha256": generic_sha,
+        "bytes": 8, "mime": "application/octet-stream",
+        "width": None, "height": None,
+    }
+    generic_root = tempfile.mkdtemp(prefix="mcp-generic-")
+    generic_saved = mcp._save_blob(
+        generic_root,
+        {"type": "blob", "mimeType": "application/x-msdownload",
+         "data": base64.b64encode(generic).decode("ascii")}, 0)
+    assert generic_saved == generic_expected, \
+        "generic bytes trusted an executable-like declaration or were discarded"
+    with open(os.path.join(
+            generic_root, *generic_expected["path"].split("/")), "rb") as f:
+        assert f.read() == generic
+    print("[mcp-binary] generic bytes use safe .bin/octet-stream with null dimensions")
+
+
 def image_structured_artifacts():
     raw = _literal_png()
     root = tempfile.mkdtemp(prefix="mcp-structured-")
@@ -577,6 +660,9 @@ def main():
     image_directory_swap_race()
     image_publication_swap_race()
     image_existing_target_swap_race()
+    image_existing_parent_redirect_at_open()
+    wav_artifact()
+    generic_binary_artifact()
     image_structured_artifacts()
     image_signature_type()
     image_mime_conflict()

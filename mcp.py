@@ -658,6 +658,23 @@ def _image_info(raw):
     return mime, ext, width, height
 
 
+def _artifact_info(raw, block_type, declared):
+    """Classify bytes without deriving any filesystem suffix from a declaration."""
+    image = _image_info(raw)
+    if image is not None:
+        mime, ext, width, height = image
+        normalized = "image/jpeg" if declared == "image/jpg" else declared
+        return image if not normalized or normalized == mime else None
+    if block_type == "image" or declared.startswith("image/"):
+        return None
+    if (len(raw) >= 12 and raw[:4] == b"RIFF"
+            and raw[8:12] == b"WAVE"):
+        if declared and declared not in {"audio/wav", "audio/x-wav"}:
+            return None
+        return "audio/wav", ".wav", None, None
+    return "application/octet-stream", ".bin", None, None
+
+
 def _artifact_directory(root):
     """Create and return the physical, unredirected expert-local directory."""
     import fileauth
@@ -713,6 +730,15 @@ def _read_immutable_target(path, raw):
     identities = {(s.st_dev, s.st_ino) for s in (before, opened, after)}
     return (len(identities) == 1 and stat.S_ISREG(opened.st_mode)
             and opened.st_nlink == 1 and after.st_nlink == 1 and data == raw)
+
+
+def _validated_artifact(root, directory, identity, path, raw, metadata):
+    """The only success gate: verify target first, then physical directory."""
+    if not _read_immutable_target(path, raw):
+        return None
+    if not _stable_artifact_directory(root, directory, identity):
+        return None
+    return metadata
 
 
 def _remove_published_alias(path, temporary):
@@ -788,15 +814,12 @@ def _save_blob(root, c, n):
         return None
     if not raw or len(raw) > _MAX_BLOB_BYTES:  # a tool result is untrusted input
         return None
-    image = _image_info(raw)
-    if image is None:
-        return None
-    mime, ext, width, height = image
+    block_type = str(c.get("type") or "").strip().lower()
     declared = str(c.get("mimeType") or c.get("mime_type") or "").strip().lower()
-    if declared == "image/jpg":
-        declared = "image/jpeg"
-    if declared and declared != mime:
+    artifact = _artifact_info(raw, block_type, declared)
+    if artifact is None:
         return None
+    mime, ext, width, height = artifact
     digest = hashlib.sha256(raw).hexdigest()
     name = digest + ext
     rel = f"tmp/mcp-artifacts/{name}"
@@ -806,9 +829,8 @@ def _save_blob(root, c, n):
         d, directory_identity = _artifact_directory(root)
         path = os.path.join(d, name)
         if os.path.lexists(path):
-            return metadata if (_stable_artifact_directory(
-                root, d, directory_identity) and
-                _read_immutable_target(path, raw)) else None
+            return _validated_artifact(
+                root, d, directory_identity, path, raw, metadata)
         import tempfile
         fd, temporary = tempfile.mkstemp(prefix=f".{digest}-", suffix=".tmp",
                                          dir=d)
@@ -840,9 +862,8 @@ def _save_blob(root, c, n):
                             target_info = os.stat(
                                 name, dir_fd=dir_fd, follow_symlinks=False)
                     except FileExistsError:
-                        return metadata if (_stable_artifact_directory(
-                            root, d, directory_identity) and
-                            _read_immutable_target(path, raw)) else None
+                        return _validated_artifact(
+                            root, d, directory_identity, path, raw, metadata)
                     if ((target_info.st_dev, target_info.st_ino) !=
                             (temp_info.st_dev, temp_info.st_ino)
                             or not _stable_artifact_directory(
@@ -864,12 +885,10 @@ def _save_blob(root, c, n):
                     os.unlink(temporary)
                 except FileNotFoundError:
                     pass
-        if not (_stable_artifact_directory(root, d, directory_identity)
-                and _read_immutable_target(path, raw)):
-            return None
+        return _validated_artifact(
+            root, d, directory_identity, path, raw, metadata)
     except (OSError, fileauth.Denied):
         return None
-    return metadata
 
 
 def render_result(result, root=None, artifacts=None):

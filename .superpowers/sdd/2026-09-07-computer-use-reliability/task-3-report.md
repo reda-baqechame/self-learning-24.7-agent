@@ -312,3 +312,153 @@ Self-review: all artifact paths remain rooted through the repository's File Auth
 Evidence limit: the complete-suite footer earlier in this report belongs to the original Task 3 commit and is not evidence for this review fix. Per controller direction, this round did not run or claim a broad full suite. Focused MCP, computer-use, and all seven relevant mutations are the verification boundary. No paid or external provider was called.
 
 Fix-round status: all review findings are implemented, the scoped verification is green, and the changes are committed. Ready for independent review.
+
+## Independent review fix round 2: centralized success gate and non-image restoration
+
+This section supersedes fix-round-1 claims about successful-return validation and unsupported non-image blocks. Base for this round: `61b19396afe8b599e9d370b12d362aff6385b621`. The controller ruled out another ad-hoc containment primitive and required one ordered validation gate shared by every successful path. It also required restoration of bounded audio/generic binary evidence without allowing declared MIME text to choose an executable or path-derived suffix.
+
+### RED evidence
+
+The reviewer regression uses the real Windows filesystem. It creates an existing valid digest target, lets the target pass its first `lstat`, moves the whole `tmp` directory to an outside temporary directory, creates a junction from the original `root/tmp` name to the moved outside directory, and then completes the open through that redirect. The inode and bytes remain identical, so the fix-round-1 target reader accepted it because its directory check occurred before target verification.
+
+```powershell
+python -c "import sys; sys.path.insert(0,'tests'); import test_mcp as t; t.image_existing_parent_redirect_at_open()"
+```
+
+Exit 1; exact final line:
+
+```text
+AssertionError: same-inode target outside a redirected parent was returned as local
+```
+
+The audio fixture is a literal 44-byte PCM WAV header. Its independently computed SHA-256 is `5b517b506f635e251ee0d7020062f1ce375cc3a92f1f445e71be6995f4a591f1`.
+
+```powershell
+python -c "import sys; sys.path.insert(0,'tests'); import test_mcp as t; t.wav_artifact()"
+```
+
+Exit 1:
+
+```text
+AssertionError: valid WAV evidence was discarded
+```
+
+The generic fixture is the literal eight bytes `00 01 02 62 6c 6f 62 ff`, independently hashed as `626a57d7c9a3afc67e22c1d5f461d462282bb06211bb4a0275d22030f080617c`. Its supplied declaration is deliberately `application/x-msdownload`; the safe contract must ignore that declaration for path/type selection.
+
+```powershell
+python -c "import sys; sys.path.insert(0,'tests'); import test_mcp as t; t.generic_binary_artifact()"
+```
+
+Exit 1:
+
+```text
+AssertionError: generic bytes trusted an executable-like declaration or were discarded
+```
+
+The literal hashes above were computed independently from the implementation with .NET `System.Security.Cryptography.SHA256.HashData`, not an MCP helper.
+
+### Implementation and ordered contract
+
+`_validated_artifact(root, directory, identity, path, raw, metadata)` is now the only function that returns successful metadata. Its order is fixed:
+
+1. `_read_immutable_target` verifies that the named target is a stable, regular, singly linked file with the expected complete bytes and a consistent device/inode across `lstat`, open, `fstat`, read, and final `lstat`.
+2. Only after target verification completes, `_stable_artifact_directory` re-enters the File Authority boundary and requires the physical artifact directory to resolve to the originally opened expert-local directory identity.
+3. Metadata is returned only if both checks pass in that order.
+
+All three successful branches call this same gate: a target that existed before the save, a target found through `FileExistsError` during concurrent no-replace publication, and a newly published target after its temporary alias has been removed. There is no direct `return metadata` in `_save_blob`. The Windows parent-move/junction regression preserves target identity and bytes deliberately; only the post-verification directory step can refuse it, and it does.
+
+Classification now separates image and non-image contracts without using declaration text as a suffix:
+
+- PNG, JPEG, WebP, and GIF remain identified from byte signatures. Their canonical MIME and fixed safe extension come from those signatures. A conflicting image declaration is refused. PNG/JPEG/WebP retain parsed dimensions; GIF remains null/null.
+- RIFF/WAVE bytes use canonical `audio/wav` and `.wav`, with null dimensions. Only empty, `audio/wav`, or `audio/x-wav` declarations are accepted for recognized WAV bytes.
+- Other non-image audio/blob bytes use canonical `application/octet-stream` and `.bin`, with null dimensions, regardless of an executable-like declaration.
+- A block typed as image, or declared as an image, still refuses when its bytes do not carry a supported image signature; it cannot fall through to generic storage.
+
+Both restored fixtures are reopened from their literal expected content-addressed paths and compared with the original bytes.
+
+### GREEN evidence
+
+```powershell
+python tests/test_mcp.py
+```
+
+Exit 0. Exact relevant result lines:
+
+```text
+[mcp-return-gate] parent move/junction during existing target open is refused after byte verification
+[mcp-binary] literal WAV retains canonical .wav/audio metadata
+[mcp-binary] generic bytes use safe .bin/octet-stream with null dimensions
+[mcp-structured] long display text truncates, but exact structured path/hash/bytes/mime/dimensions remain available
+[mcp-signature] unlabelled PNG derives .png/type/dimensions from bytes
+[mcp-signature] PNG bytes declared as JPEG are refused before storage
+PASS test_mcp
+```
+
+```powershell
+python tests/test_computeruse.py
+```
+
+Exit 0:
+
+```text
+.............
+----------------------------------------------------------------------
+Ran 13 tests in 0.316s
+
+OK
+PASS test_computeruse
+```
+
+### Mutation evidence and badge
+
+The existing-target and declaration mutants were updated to target the centralized byte/identity gate and byte-signature classifier. Three new registered mutants remove the post-verification directory gate, demote WAV to generic binary, or let the generic declaration control an executable suffix.
+
+```powershell
+python mutate_check.py "mcp image:"
+```
+
+Exit 0; exact output (the terminal rendered the harness dash as a replacement glyph):
+
+```text
+==============================================================================
+MUTATION RESULTS � a MISSED row is a test that measures nothing
+==============================================================================
+  CAUGHT  mcp image: digest dropped from artifact name
+          test_mcp.py failed in 8s � different literal image bytes must retain distinct SHA-256 paths
+  CAUGHT  mcp image: target byte and identity gate bypassed
+          test_mcp.py failed in 6s � linked or swapped existing digest targets must refuse
+  CAUGHT  mcp image: post-verification directory gate bypassed
+          test_mcp.py failed in 6s � a parent moved during target verification must refuse
+  CAUGHT  mcp image: directory race recheck removed
+          test_mcp.py failed in 7s � a redirected artifact directory must fail closed after creation
+  CAUGHT  mcp image: raced publication cleanup removed
+          test_mcp.py failed in 5s � a last-moment directory swap must leave no outside digest
+  CAUGHT  mcp image: structured artifact sink dropped
+          test_mcp.py failed in 6s � artifact metadata must survive flattened display truncation
+  CAUGHT  mcp image: declaration conflict accepted
+          test_mcp.py failed in 5s � mislabeled image bytes must not claim the declared MIME
+  CAUGHT  mcp image: WAV canonicalization removed
+          test_mcp.py failed in 6s � WAV bytes must retain safe canonical audio metadata
+  CAUGHT  mcp image: generic declaration controls suffix
+          test_mcp.py failed in 5s � generic bytes must use .bin and application/octet-stream
+  CAUGHT  mcp image: encoded allocation bound removed
+          test_mcp.py failed in 6s � oversized encoded input must refuse before base64 decoding
+
+10 mutations: 10 caught, 0 missed, 0 skipped
+```
+
+Independent registry readback prints `registered mutations: 84`; the README badge is updated from 81 to 84. This is the total registration count, while only the ten filtered MCP artifact mutants ran here.
+
+### Scope, self-review, and limitation
+
+- `mcp.py`: one ordered success gate plus safe WAV/generic classification.
+- `tests/test_mcp.py`: real Windows parent relocation/junction regression and literal WAV/generic byte contracts.
+- `mutate_check.py`: centralized-gate anchors and three new artifact mutants.
+- `README.md`: registration badge, 81 to 84.
+- This report: fix-round-2 RED/GREEN/mutation evidence and limitations.
+
+No transport, provider, browser-action, dependency, or File Authority implementation was changed. The round follows the controller's centralized validation architecture rather than adding a fourth containment mechanism. The protected preexisting line-ending-only edits in `tests/mock_effect_server.py` and `ui.html` remain untouched and unstaged. No broad suite ran in this round; the earlier full-suite footer does not prove this fix.
+
+The success gate proves target bytes/identity and physical expert-local directory resolution at the instant immediately before `_save_blob` returns. It does not and cannot claim a path remains immutable against a privileged external process that renames an ancestor after return. Any later consumer, including Task 5, must independently re-enter File Authority and revalidate the path, target identity, bytes, and digest at consumption time.
+
+Fix-round-2 status: the exact review race and both restored non-image contracts are GREEN; all ten scoped mutations are caught. Ready for scoped commit and independent review.
