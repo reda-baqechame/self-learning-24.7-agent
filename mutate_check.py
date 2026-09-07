@@ -37,6 +37,19 @@ MUTATIONS = [
      '                    self._terminate("MCP server closed the pipe")',
      '                    pass',
      "test_mcp_hardening.py", "EOF must wake all waiters before their request timeouts"),
+    ("mcp image: digest dropped from artifact name", "mcp.py",
+     '    name = digest + ext',
+     '    name = "artifact" + ext',
+     "test_mcp.py", "different literal image bytes must retain distinct SHA-256 paths"),
+    ("mcp image: same-path overwrite accepted", "mcp.py",
+     '        if os.path.exists(path):\n'
+     '            with open(path, "rb") as f:\n'
+     '                return metadata if f.read(len(raw) + 1) == raw else None',
+     '        if os.path.exists(path):\n'
+     '            with open(path, "wb") as f:\n'
+     '                f.write(raw)\n'
+     '            return metadata',
+     "test_mcp.py", "identical bytes must deduplicate without rewriting the artifact"),
     ("computer: browser selector misclassified as URL", "mcp.py",
      '        looks_urlish = ((str(k).lower() in _URL_KEYS and not selector_target)',
      '        looks_urlish = ((str(k).lower() in _URL_KEYS)',

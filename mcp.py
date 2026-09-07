@@ -570,10 +570,79 @@ def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
 
 _IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
             "image/webp": ".webp", "image/gif": ".gif"}
+_MAX_BLOB_BYTES = 25_000_000
+_MAX_DIMENSION_SCAN = 65_536
+
+
+def _image_dimensions(raw, mime):
+    """Return bounded header dimensions for supported image encodings."""
+    if mime == "image/png":
+        if (len(raw) >= 24 and raw[:8] == b"\x89PNG\r\n\x1a\n"
+                and raw[12:16] == b"IHDR"):
+            width = int.from_bytes(raw[16:20], "big")
+            height = int.from_bytes(raw[20:24], "big")
+            if width and height:
+                return width, height
+        return None, None
+
+    if mime in ("image/jpeg", "image/jpg"):
+        data = memoryview(raw)[:_MAX_DIMENSION_SCAN]
+        if len(data) < 4 or bytes(data[:2]) != b"\xff\xd8":
+            return None, None
+        i = 2
+        sof = {0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+               0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf}
+        while i + 1 < len(data):
+            if data[i] != 0xff:
+                i += 1
+                continue
+            while i < len(data) and data[i] == 0xff:
+                i += 1
+            if i >= len(data):
+                break
+            marker = data[i]
+            i += 1
+            if marker == 0x00 or marker == 0x01 or 0xd0 <= marker <= 0xd9:
+                continue
+            if i + 2 > len(data):
+                break
+            segment_size = int.from_bytes(data[i:i + 2], "big")
+            if segment_size < 2 or i + segment_size > len(data):
+                break
+            if marker in sof and segment_size >= 7:
+                height = int.from_bytes(data[i + 3:i + 5], "big")
+                width = int.from_bytes(data[i + 5:i + 7], "big")
+                if width and height:
+                    return width, height
+                break
+            i += segment_size
+        return None, None
+
+    if mime == "image/webp":
+        data = memoryview(raw)[:_MAX_DIMENSION_SCAN]
+        if (len(data) < 20 or bytes(data[:4]) != b"RIFF"
+                or bytes(data[8:12]) != b"WEBP"):
+            return None, None
+        kind = bytes(data[12:16])
+        chunk_size = int.from_bytes(data[16:20], "little")
+        if kind == b"VP8X" and chunk_size >= 10 and len(data) >= 30:
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+            return width, height
+        if (kind == b"VP8 " and chunk_size >= 10 and len(data) >= 30
+                and bytes(data[23:26]) == b"\x9d\x01\x2a"):
+            width = int.from_bytes(data[26:28], "little") & 0x3fff
+            height = int.from_bytes(data[28:30], "little") & 0x3fff
+            return (width, height) if width and height else (None, None)
+        if (kind == b"VP8L" and chunk_size >= 5 and len(data) >= 25
+                and data[20] == 0x2f):
+            bits = int.from_bytes(data[21:25], "little")
+            return (bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1
+    return None, None
 
 
 def _save_blob(root, c, n):
-    """Write a non-text content block to tmp/ and return its relative path.
+    """Store a non-text block as an immutable expert-local artifact.
 
     An image block used to be replaced with "[image content omitted]" and
     thrown away. That is the difference between a browser that can act and a
@@ -596,23 +665,51 @@ def _save_blob(root, c, n):
     data = c.get("data") or c.get("blob")
     if not data or not isinstance(data, str):
         return None
-    mime = str(c.get("mimeType") or c.get("mime_type") or "")
-    ext = _IMG_EXT.get(mime.lower(), ".bin")
+    mime = str(c.get("mimeType") or c.get("mime_type") or "").strip().lower()
+    ext = _IMG_EXT.get(mime, ".bin")
     try:
         raw = base64.b64decode(data, validate=True)
     except Exception:
         return None
-    if not raw or len(raw) > 25_000_000:      # a tool result is untrusted input
+    if not raw or len(raw) > _MAX_BLOB_BYTES:  # a tool result is untrusted input
         return None
-    d = os.path.join(root or ".", "tmp")
+    digest = hashlib.sha256(raw).hexdigest()
+    name = digest + ext
+    rel = f"tmp/mcp-artifacts/{name}"
+    d = os.path.join(root or ".", "tmp", "mcp-artifacts")
+    path = os.path.join(d, name)
+    width, height = _image_dimensions(raw, mime)
+    metadata = {"path": rel, "sha256": digest, "bytes": len(raw),
+                "mime": mime or "unknown", "width": width, "height": height}
     try:
         os.makedirs(d, exist_ok=True)
-        name = f"mcp-{int(time.time())}-{n}{ext}"
-        with open(os.path.join(d, name), "wb") as f:
-            f.write(raw)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                return metadata if f.read(len(raw) + 1) == raw else None
+        import tempfile
+        fd, temporary = tempfile.mkstemp(prefix=f".{digest}-", suffix=".tmp",
+                                         dir=d)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            try:
+                # A hard-link publication is atomic and cannot replace a path
+                # another writer published after our existence check.
+                os.link(temporary, path)
+            except FileExistsError:
+                with open(path, "rb") as f:
+                    if f.read(len(raw) + 1) != raw:
+                        return None
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     except OSError:
         return None
-    return f"tmp/{name}", len(raw), mime or "unknown"
+    return metadata
 
 
 def render_result(result, root=None):
@@ -624,10 +721,11 @@ def render_result(result, root=None):
         else:
             saved = _save_blob(root, c, i)
             if saved:
-                rel, size, mime = saved
+                rel = saved["path"]
+                metadata = json.dumps(saved, separators=(",", ":"))
                 parts.append(
                     f"[{c.get('type', 'binary')} content saved to {rel} "
-                    f"({size:,} bytes, {mime}) — it is NOT in this text. To "
+                    f"with immutable metadata {metadata} — it is NOT in this text. To "
                     f"read it: run_command "
                     f"`python ingest.py vision {rel} out/seen-{i}.md` and then "
                     f"read_file that. This is how a screenshot becomes "
