@@ -13,6 +13,9 @@ trial and click are separate operations: page code can run between them. A
 successful input acknowledgment is `ACTION_DISPATCHED`, with a separate fresh
 `post_observation` and `workflow_verified: false`. Failed dispatch/readback is
 `UNKNOWN` and the consumed receipt cannot be retried.
+Blocked or empty observations remain available for recovery. An acknowledged
+click that opens a dialog or login form preserves `ACTION_DISPATCHED` and those
+post-observation flags; any follow-up click is refused before adapter entry.
 
 The owner must explicitly review `computer_locator_tool: "browser_run_code_unsafe"`
 and recompute `trust_identity`; the field is identity-bound. Missing/mismatched
@@ -41,7 +44,7 @@ continuously, prove what they did, and remember what they learned.**
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![tests](https://img.shields.io/badge/tests-157%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-89%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-91%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
 119 Python modules · 157 registered acceptance tests · one HTML control panel · no

@@ -158,14 +158,47 @@ class BrowserAuthority(unittest.TestCase):
 
     def test_target_and_destination_are_exact(self):
         for changed in (
-            dict(self.state,links=[]),
             dict(self.state,links=self.state["links"]*2),
             dict(self.state,links=[dict(self.state["links"][0],href="https://elsewhere.test/x")]),
-            dict(self.state,links=[dict(self.state["links"][0],box={"x":0,"y":0,"width":0,"height":1})]),
-            dict(self.state,dialog=True), dict(self.state,expired=True)):
+            dict(self.state,links=[dict(self.state["links"][0],box={"x":0,"y":0,"width":0,"height":1})])):
             with self.subTest(changed=changed):
                 with self.assertRaises(C.Refused): self.auth.observe(changed)
-        print("[browser-target] absent, duplicate, off-origin, dialog-blocked and expired states refuse")
+        print("[browser-target] duplicate, off-origin and invalid-geometry observations refuse")
+
+    def test_blocked_and_empty_observations_are_preserved_but_cannot_click(self):
+        for state in (dict(self.state,dialog=True),dict(self.state,expired=True),
+                      dict(self.state,links=[])):
+            with self.subTest(state=state):
+                receipt=self.auth.observe(state)
+                self.assertEqual(receipt['state'],state)
+                calls=[]
+                with self.assertRaises(C.Refused):
+                    self.auth.execute_click(receipt,'INV-0',104.0,lambda p:calls.append(p))
+                self.assertEqual(calls,[])
+                self.assertNotIn(receipt['mac'],self.auth._consumed)
+        print("[blocked-observation] blocked and empty states can be sealed for recovery but refuse click before consumption or adapter entry")
+
+    def test_dispatch_preserves_blocked_post_state_but_rejects_malformed_state(self):
+        for flag in ('dialog','expired'):
+            with self.subTest(flag=flag):
+                post=dict(self.state,**{flag:True})
+                receipt=self.auth.observe(self.state)
+                result=self.auth.execute_click(receipt,'INV-0',104.0,lambda p:{
+                    'clicked':True,'status':'ACTION_DISPATCHED','precondition_sha256':p['state_sha256'],
+                    'destination':self.state['links'][0]['href'],'post_observation':post})
+                self.assertEqual(result['status'],'ACTION_DISPATCHED')
+                self.assertEqual(result['post_observation'],post)
+                self.assertFalse(result['workflow_verified'])
+        for post in (dict(self.state,dialog='true'),dict(self.state,expired=1),
+                     {k:v for k,v in self.state.items() if k!='binding'}):
+            with self.subTest(post=post):
+                receipt=self.auth.observe(self.state)
+                with self.assertRaises(C.Unresolved):
+                    self.auth.execute_click(receipt,'INV-0',104.0,lambda p:{
+                        'clicked':True,'status':'ACTION_DISPATCHED','precondition_sha256':p['state_sha256'],
+                        'destination':self.state['links'][0]['href'],'post_observation':post})
+                self.assertIn(receipt['mac'],self.auth._consumed)
+        print("[blocked-post-state] acknowledged dialog/auth transitions preserve ACTION_DISPATCHED and observation; malformed post-state remains unknown")
 
     def test_one_use_atomic_action_and_uncertain_failure(self):
         receipt=self.auth.observe(self.state)

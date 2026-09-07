@@ -256,7 +256,8 @@ class BrowserAuthority:
         self._consumed = set()
         self._lock = threading.RLock()
 
-    def _state(self, state, allow_empty=False):
+    def _state(self, state):
+        """Validate observable data; blocking flags and empty targets are evidence."""
         if not isinstance(state, dict) or set(state) != {"url", "title", "dialog", "expired", "links", "binding"}:
             raise Refused("invalid browser observation shape")
         binding = state["binding"]
@@ -268,13 +269,11 @@ class BrowserAuthority:
             raise Refused("invalid browser title")
         if type(state["dialog"]) is not bool or type(state["expired"]) is not bool:
             raise Refused("invalid browser blocking state")
-        if state["dialog"] or state["expired"]:
-            raise Refused("browser action blocked by dialog or authentication state")
         if _origin(state["url"]) != self.allowed_origin:
             raise Refused("page is outside the allowed browser origin")
         links = state["links"]
-        if not isinstance(links, list) or not (0 if allow_empty else 1) <= len(links) <= MAX_INVOICES:
-            raise Refused("browser observation has no bounded targets")
+        if not isinstance(links, list) or not 0 <= len(links) <= MAX_INVOICES:
+            raise Refused("invalid bounded target collection")
         ids = set()
         for link in links:
             if not isinstance(link, dict) or set(link) != {"id", "href", "text", "box"}:
@@ -337,6 +336,8 @@ class BrowserAuthority:
         """Execute once; adapter failure or malformed readback is unresolved."""
         with self._lock:
             state, digest = self._verified(receipt, deadline)
+            if state["dialog"] or state["expired"]:
+                raise Refused("browser action blocked by dialog or authentication state")
             if receipt["mac"] in self._consumed:
                 raise Refused("browser action authorization was already consumed")
             targets = [x for x in state["links"] if x["id"] == target_id]
@@ -365,9 +366,9 @@ class BrowserAuthority:
                 destination = result["destination"]
                 if _origin(destination) != self.allowed_origin:
                     raise ValueError
-                post = self._state(result["post_observation"], allow_empty=True)
+                post = self._state(result["post_observation"])
             except (KeyError, Refused, ValueError) as error:
-                raise Unresolved("browser action destination is not independently allowed") from error
+                raise Unresolved("browser dispatch destination or post-observation is invalid") from error
             return {"status":"ACTION_DISPATCHED", "session":self.session_id,
                     "revision":receipt["revision"], "target_id":target_id,
                     "destination":destination, "state_sha256":digest,

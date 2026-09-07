@@ -68,7 +68,7 @@ def run():
             assert actual['Config']['User']=='node' and len(actual['Mounts'])==2
             navigate()
             print('[chromium] '+json.dumps(code('async page => ({version:page.context().browser().version()})')),flush=True)
-            for case in [*CHANGES,'valid','document-replaced','tab-replaced',
+            for case in ['opens-dialog','opens-login',*CHANGES,'valid','document-replaced','tab-replaced',
                          'wrong-tab-binding','wrong-frame-binding','unknown-after-dispatch']:
                 navigate()
                 auth=C.BrowserAuthority(ORIGIN,max_age=20)
@@ -76,7 +76,12 @@ def run():
                 if case in ('wrong-tab-binding','wrong-frame-binding'):
                     observed['binding']['tab' if case=='wrong-tab-binding' else 'frame']='wrong'
                 receipt=auth.observe(observed)
-                if case in CHANGES:
+                if case in ('opens-dialog','opens-login'):
+                    transition=("const d=document.createElement('dialog');document.body.append(d);d.showModal()"
+                                if case=='opens-dialog' else
+                                "const input=document.createElement('input');input.type='password';document.body.append(input)")
+                    code('async page => {await page.evaluate(()=>{document.querySelector("a").addEventListener("click",()=>{'+transition+'})});return {ok:true}}')
+                elif case in CHANGES:
                     code('async page => {await page.evaluate(()=>{const a=document.querySelector("a");'+CHANGES[case]+'});return {ok:true}}')
                 elif case == 'document-replaced':
                     code('async page => {await page.reload();return {ok:true}}')
@@ -92,9 +97,19 @@ def run():
                 try:
                     result=auth.execute_click(receipt,'INV-0',time.monotonic()+5,click)
                     outcome='ACTION_DISPATCHED'
-                    if case == 'valid':
+                    if case in ('valid','opens-dialog','opens-login'):
                         assert result['status']=='ACTION_DISPATCHED' and not result['workflow_verified']
                         assert result['post_observation']['url']==ORIGIN+'/'
+                    if case in ('opens-dialog','opens-login'):
+                        assert result['post_observation']['dialog' if case=='opens-dialog' else 'expired'] is True
+                        blocked=auth.observe(result['post_observation'])
+                        entered=[]
+                        try:
+                            auth.execute_click(blocked,'INV-0',time.monotonic()+5,lambda p:entered.append(p))
+                            raise AssertionError('blocked follow-up authorized')
+                        except C.Refused:
+                            pass
+                        assert not entered and blocked['mac'] not in auth._consumed
                 except C.Refused:
                     outcome='REFUSED'
                 except C.Unresolved:
@@ -105,8 +120,8 @@ def run():
                         count+=c.count;trusted+=c.trusted;
                     }return {count,trusted};}''')
                 count=counters['count']
-                expected='ACTION_DISPATCHED' if case=='valid' else 'UNKNOWN' if case=='unknown-after-dispatch' else 'REFUSED'
-                expected_count=1 if case in ('valid','unknown-after-dispatch') else 0
+                expected='ACTION_DISPATCHED' if case in ('valid','opens-dialog','opens-login') else 'UNKNOWN' if case=='unknown-after-dispatch' else 'REFUSED'
+                expected_count=1 if case in ('valid','opens-dialog','opens-login','unknown-after-dispatch') else 0
                 print(f'[real-click:{case}] {outcome}, activations={count}, expected={expected}/{expected_count}',flush=True)
                 assert (outcome,count)==(expected,expected_count), case
                 assert counters['trusted']==expected_count, 'click must deliver trusted user input'
