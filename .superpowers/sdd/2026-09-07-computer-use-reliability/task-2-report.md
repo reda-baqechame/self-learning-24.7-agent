@@ -165,3 +165,126 @@ The protected preexisting line-ending-only changes in `tests/mock_effect_server.
 Concerns and evidence limits: the lock primitive deliberately treats locks older than 60 seconds as stale. A process suspended past that threshold can lose exclusivity; this follows the brief's specified existing lock contract. Direct public `save` is an atomic whole-snapshot write and does not merge competing snapshots; narrow provider/role edits must use `add`/`set_role` or `_update`. These tests prove local filesystem transactions and injected replacement-error behavior, not power-loss recovery, arbitrary external writers, or live browser/release readiness. No paid AI provider was called.
 
 Final status: implemented and self-reviewed; focused tests pass, all five provider mutations are caught, and the complete suite exits 0 with 154 passed files, two skipped files, and zero failed files. Ready for scoped commit and independent review.
+
+## Independent review fix round 1: non-stealable OS exclusion
+
+Review finding: the original task-plan lock choice was weaker than the transaction invariant. A paused live owner could age past 60 seconds, lose its lock to another writer, then resume and overwrite that writer's update. The controller explicitly overrode the plan's requirement to use `locks.holding` and authorized a separate standard-library advisory primitive in `locks.py`. This section supersedes the earlier report's acceptance of that stale-lock limitation. Direct `save` remains an approved atomic whole-snapshot operation.
+
+The new `locks.advisory_holding(path, timeout=20)` uses `msvcrt.locking(... LK_NBLCK, 1)` on Windows and `fcntl.flock(... LOCK_EX | LOCK_NB)` on POSIX. It opens a persistent lock file without truncation, initializes byte zero only for an empty file, and never removes/replaces the file. Each acquisition holds its own descriptor until unlock/close. Contention retries use monotonic deadlines and bounded jitter. File age has no role; the OS releases exclusion when the owning process dies. The original `locks.holding` implementation is unchanged. Provider `_update` now uses the advisory primitive around the same complete transaction.
+
+### RED before implementation
+
+The first new regression launches a separate process running actual public `add`, pauses its `save` after loading and acquiring the production transaction lock, and sets the real lock file's mtime 120 seconds into the past. A second process calls public `set_role` with a 0.2-second lock timeout. The first process remains alive and blocked awaiting input. The regression requires the second process to time out without changing settings, then resumes the first process and independently checks that both public edits and every original setting survive. It also checks lock-file identity and size across subsequent acquisitions.
+
+Command: `python tests/test_providers.py`. Exit 1 before any lock implementation change. Exact traceback:
+
+```text
+Traceback (most recent call last):
+  File "C:\Users\redab\OneDrive\Bureau\self learning 24.7 agent\computer-use-worktree\tests\test_providers.py", line 487, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\redab\OneDrive\Bureau\self learning 24.7 agent\computer-use-worktree\tests\test_providers.py", line 308, in main
+    process_updates(sb)
+    ~~~~~~~~~~~~~~~^^^^
+  File "C:\Users\redab\OneDrive\Bureau\self learning 24.7 agent\computer-use-worktree\tests\test_providers.py", line 126, in process_updates
+    assert out.strip() == "BLOCKED", "aged live provider owner was stolen"
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: aged live provider owner was stolen
+```
+
+The second regression kills a separately paused provider process before its save, waits for process exit, then requires a new public `set_role` to commit within the same short lock timeout, without stale-time manipulation. It independently verifies that the killed writer committed nothing and that recovery changed only the new role.
+
+```powershell
+python -c "import sys; sys.path.insert(0, 'tests'); import test_providers as t; sb=t.make_sandbox('providers_dead_red', providers={'m': {'script': 's.json'}}, roles={'tester': 'm'}, scripts={'s.json': []}); t.dead_provider(sb)"
+```
+
+Exit 1 before implementation. Exact traceback:
+
+```text
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import sys; sys.path.insert(0, 'tests'); import test_providers as t; sb=t.make_sandbox('providers_dead_red', providers={'m': {'script': 's.json'}}, roles={'tester': 'm'}, scripts={'s.json': []}); t.dead_provider(sb)
+                                                                                                                                                                                                        ~~~~~~~~~~~~~~~^^^^
+  File "C:\Users\redab\OneDrive\Bureau\self learning 24.7 agent\computer-use-worktree\tests\test_providers.py", line 154, in dead_provider
+    assert out.strip() == "COMMITTED", "dead provider owner retained exclusion"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: dead provider owner retained exclusion
+```
+
+The separate dead-owner RED sandbox remains in `C:\Users\redab\AppData\Local\Temp\agent-suite\providers_dead_red`. The live-owner RED traceback is preserved above; subsequent tests reused its ordinary provider sandbox.
+
+### GREEN and mutation evidence
+
+Windows command: `python tests/test_providers.py`. Passed immediately after implementing the advisory primitive; then passed after strengthening stable-file assertions and adapting the existing concurrency observer to recognize both lock variants. Exact final assertion/result lines (routine fleet paths and timestamped auto-wiring messages omitted):
+
+```text
+[transaction] concurrent public add + set_role preserve both edits and all original settings
+[interruption] concurrent failed replacements preserve original and foreign temp; unique temps fsynced and cleaned
+[live-owner] old mtime cannot steal a paused provider transaction; resumed edits both survive
+[dead-owner] terminating a provider process releases exclusion without stale-time takeover
+[add] known rail + custom endpoint added; settings round-tripped losslessly; only key NAMES are written
+[roles] any role re-pointed at any provider/model incl. fallback + escalation; unknown providers refused
+[catalog] models listed from a live /models endpoint; free-only and text filters work
+[custom] your own tools appear as capabilities, honour ready_check, and reach agents with the exact command to run
+[fleet-tools] a tools.json at the fleet home reaches every expert in it
+[plug] a key in the environment IS a provider: a role named a rail with no settings entry and it wired from the verified catalog at runtime; keyless rails refuse naming the exact env var; cloudflare's missing account id is a named error at wire time; an explicit settings entry always outranks the catalog
+PASS test_providers
+```
+
+Windows command: `python tests/test_lock.py`. Exit 0. Exact result lines:
+
+```text
+[unit] live lock blocks; dead/unknown/stale owner locks are broken
+[integration] two same-course tasks serialized, both done, lock released
+[hammer] 12 threads x 40 acquisitions: every writer survived and all 480 rows landed � EACCES during lockfile creation is retried as the contention it is
+PASS test_lock
+```
+
+Command: `python mutate_check.py "providers:"`. Exit 0. Exact output:
+
+```text
+==============================================================================
+MUTATION RESULTS � a MISSED row is a test that measures nothing
+==============================================================================
+  CAUGHT  providers: unrelated root settings dropped
+          test_providers.py failed in 1s � provider edits must preserve unrelated root tables
+  CAUGHT  providers: nested tables stringified
+          test_providers.py failed in 0s � provider edits must preserve nested tables as tables
+  CAUGHT  providers: transaction lock removed
+          test_providers.py failed in 0s � concurrent public add and set_role must both survive
+  CAUGHT  providers: shared temporary file
+          test_providers.py failed in 1s � concurrent failed saves must isolate and clean only their own temps
+  CAUGHT  providers: stale load before transaction lock
+          test_providers.py failed in 1s � the waiting public update must read the preceding commit
+  CAUGHT  providers: stealable age-based lock restored
+          test_providers.py failed in 1s � an aged live provider owner must retain exclusion
+
+6 mutations: 6 caught, 0 missed, 0 skipped
+```
+
+Existing lock/fresh-load mutation anchors now target the advisory call. The new mutant restores the complete old age-based lock call, and the paused-live-owner process regression catches it. The README registration badge increases from 73 to 74; only the six provider mutations were run this round.
+
+POSIX command, using the already installed Python image without a pull or network access:
+
+```powershell
+docker run --rm --pull never --network none --read-only --tmpfs /tmp:rw --mount "type=bind,source=C:\Users\redab\OneDrive\Bureau\self learning 24.7 agent\computer-use-worktree,target=/src,readonly" -w /src -e PYTHONDONTWRITEBYTECODE=1 python:3.11-slim python tests/test_providers.py
+```
+
+Exit 0. The same provider assertion/result lines printed as in the Windows GREEN block, ending `PASS test_providers`. This executed actual `fcntl.flock` thread/process exclusion, old-mtime refusal, dead-process release, unique-temp failure recovery, and provider operations on the container's Linux temporary filesystem. It is not a mocked POSIX backend. The source mount was read-only; the disposable container and its successful temporary fixtures were removed by `--rm` after completion.
+
+### Fix-round self-review and scope
+
+- `locks.py`: adds one advisory context manager and platform-standard imports; the existing age-based `holding` code is unchanged.
+- `providers.py`: switches only the transaction lock call.
+- `tests/test_providers.py`: subprocess regressions, stable lock-file checks, and existing observer adaptation. Concurrency/temporary-file tests run before the process regressions so their existing mutants fail for their original behavioral reasons.
+- `mutate_check.py`: updated anchors plus the age-based restoration mutant.
+- `README.md`: registration badge only.
+- This report: preserved original evidence and appended the review finding and fix evidence.
+
+No lock-file cleanup runs on unlock or process death; keeping the same file identity is part of exclusion. The file is not truncated by later open calls. Windows byte initialization races are treated as contention when the byte has already become locked. Non-contention OS errors propagate; contention times out rather than stealing. Both normal and exceptional exits close the descriptor. The provider tests use real subprocesses, real OS locks, real file ages, and real termination; only pauses and the short contender timeout are test-controlled. No new dependencies, browser/MCP changes, or delegated agents were used. Protected user files remain untouched.
+
+Verification limit: the earlier 154-pass full-suite footer belongs to the pre-review commit `d37a56904d6c2d69aee8ab40e426306d7ac207e1`. This fix round ran focused provider tests on Windows and Linux, the existing Windows lock test, and targeted provider mutations; it did not rerun the full suite. Advisory exclusion coordinates callers using the same persistent file; direct snapshot saves and unrelated external tools remain outside narrow-update merging, as approved by the controller.
+
+Final test strengthening: the dead-owner subprocess now attempts a distinct `killed-provider` addition, so equality with the original settings cannot pass merely because it attempted an identical existing value. After that test-only change, the exact Windows and Docker provider commands above were rerun and both exited 0 with the same assertion/result lines. The exact mutation command was rerun: all six rows were `CAUGHT`, each reported `failed in 1s`, and the footer remained `6 mutations: 6 caught, 0 missed, 0 skipped`. Registration readback printed `registered mutations: 74`. Task-owned diffs pass `git diff --check`.
+
+Fix-round status: the reviewed age-takeover finding is addressed; Windows and POSIX focused tests pass, the existing lock regression passes, and all six provider mutations are caught. Ready for independent review of the scoped fix commit.

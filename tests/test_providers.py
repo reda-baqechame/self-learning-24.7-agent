@@ -18,8 +18,10 @@ Run from the agent/ directory:  python tests/test_providers.py
 import json
 import copy
 import os
+import subprocess
 import sys
 import threading
+import time
 import tomllib
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -56,6 +58,111 @@ class Cat(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+_PROVIDER_PROCESS = '''
+import os, sys
+import providers as P
+import locks
+root, mode = sys.argv[1:]
+if mode in ("hold", "hold-dead"):
+    original = P.save
+    def paused_save(root, cfg):
+        with open(os.path.join(root, "provider-holder.ready"), "w") as f:
+            f.write("holding")
+        sys.stdin.readline()
+        return original(root, cfg)
+    P.save = paused_save
+    name = "held-provider" if mode == "hold" else "killed-provider"
+    P.add(root, name, base_url="https://held.example/v1")
+else:
+    old_holding = locks.holding
+    def bounded_old(path, timeout=20, stale=60):
+        return old_holding(path, timeout=0.2, stale=stale)
+    locks.holding = bounded_old
+    if hasattr(locks, "advisory_holding"):
+        os_holding = locks.advisory_holding
+        def bounded_os(path, timeout=20):
+            return os_holding(path, timeout=0.2)
+        locks.advisory_holding = bounded_os
+    try:
+        P.set_role(root, mode, "m", "process-model")
+    except TimeoutError:
+        print("BLOCKED")
+    else:
+        print("COMMITTED")
+'''
+
+
+def provider_process(sb, mode):
+    return subprocess.Popen([sys.executable, "-c", _PROVIDER_PROCESS, sb, mode],
+                            cwd=AGENT_DIR, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def paused_provider(sb, mode="hold"):
+    ready = os.path.join(sb, "provider-holder.ready")
+    if os.path.exists(ready):
+        os.remove(ready)
+    child = provider_process(sb, mode)
+    deadline = time.monotonic() + 5
+    while not os.path.exists(ready) and child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not os.path.exists(ready):
+        child.kill()
+        out, err = child.communicate(timeout=5)
+        raise AssertionError(f"provider did not reach its paused save: {out} {err}")
+    return child
+
+
+def process_updates(sb):
+    """An aged live holder keeps exclusion; process death releases it immediately."""
+    before = P.load(sb)
+    holder = paused_provider(sb)
+    try:
+        lock_path = os.path.join(sb, "settings.toml.update.lock")
+        lock_stat = os.stat(lock_path)
+        old = time.time() - 120
+        os.utime(lock_path, (old, old))
+        contender = provider_process(sb, "after-live")
+        out, err = contender.communicate(timeout=5)
+        assert contender.returncode == 0, err
+        assert out.strip() == "BLOCKED", "aged live provider owner was stolen"
+        assert P.load(sb) == before, "blocked contender changed settings"
+        out, err = holder.communicate("resume\n", timeout=5)
+        assert holder.returncode == 0, err
+        P.set_role(sb, "after-live", "m", "process-model")
+        after_stat = os.stat(lock_path)
+        assert (after_stat.st_ino, after_stat.st_size) == (lock_stat.st_ino, lock_stat.st_size), \
+            "provider locking replaced or grew its persistent lock file"
+        after = P.load(sb)
+        assert after["providers"].pop("held-provider") == {
+            "base_url": "https://held.example/v1", "api_key_env": "HELD-PROVIDER_API_KEY"}
+        assert after["roles"].pop("after-live") == {
+            "provider": "m", "model": "process-model"}
+        assert after == before, "resumed public updates lost original settings"
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+        holder.communicate(timeout=5)
+    print("[live-owner] old mtime cannot steal a paused provider transaction; resumed edits both survive")
+
+
+def dead_provider(sb):
+    """A dead process cannot hold the next provider transaction hostage."""
+    before = P.load(sb)
+    holder = paused_provider(sb, "hold-dead")
+    holder.kill()
+    holder.communicate(timeout=5)
+    assert P.load(sb) == before, "killed writer committed its paused save"
+    contender = provider_process(sb, "after-death")
+    out, err = contender.communicate(timeout=5)
+    assert contender.returncode == 0, err
+    assert out.strip() == "COMMITTED", "dead provider owner retained exclusion"
+    after = P.load(sb)
+    assert after["roles"].pop("after-death") == {"provider": "m", "model": "process-model"}
+    assert after == before, "dead-owner recovery changed unrelated settings"
+    print("[dead-owner] terminating a provider process releases exclusion without stale-time takeover")
+
+
 def concurrent_updates(sb):
     """Removing the lock or reading before it loses a distinct public edit."""
     before = P.load(sb)
@@ -64,7 +171,7 @@ def concurrent_updates(sb):
     second_loaded = threading.Event()
     second_done = threading.Event()
     errors = []
-    real_load, real_save, real_holding = P.load, P.save, locks.holding
+    real_load, real_save = P.load, P.save
 
     def observed_load(root):
         cfg = real_load(root)
@@ -73,12 +180,14 @@ def concurrent_updates(sb):
             second_boundary.set()
         return cfg
 
-    @contextmanager
-    def observed_holding(*args, **kwargs):
-        if threading.current_thread().name == "role-writer":
-            second_boundary.set()
-        with real_holding(*args, **kwargs):
-            yield
+    def observe_lock(real_holding):
+        @contextmanager
+        def observed_holding(*args, **kwargs):
+            if threading.current_thread().name == "role-writer":
+                second_boundary.set()
+            with real_holding(*args, **kwargs):
+                yield
+        return observed_holding
 
     def delayed_save(root, cfg):
         if threading.current_thread().name == "provider-writer":
@@ -106,7 +215,8 @@ def concurrent_updates(sb):
         second_done))
     with patch.object(P, "load", observed_load), \
             patch.object(P, "save", delayed_save), \
-            patch.object(locks, "holding", observed_holding):
+            patch.object(locks, "advisory_holding", observe_lock(locks.advisory_holding)), \
+            patch.object(locks, "holding", observe_lock(locks.holding)):
         first.start()
         assert first_saving.wait(5), "first public update never reached save"
         second.start()
@@ -208,6 +318,8 @@ policy = "v1"
 
     concurrent_updates(sb)
     interrupted_saves(sb)
+    process_updates(sb)
+    dead_provider(sb)
 
     # --- 1. adding providers, and a lossless settings round-trip
     before = P.load(sb)

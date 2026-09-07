@@ -188,7 +188,7 @@ def save(root, cfg):
 def _update(root, mutate):
     """Serialize a complete read-modify-save transaction across processes."""
     p = os.path.join(root, "settings.toml")
-    with locks.holding(p + ".update", timeout=20, stale=60):
+    with locks.advisory_holding(p + ".update", timeout=20):
         cfg = load(root)
         result = mutate(cfg)
         save(root, cfg)

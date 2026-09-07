@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One cross-process lock primitive for every mutating ledger.
+"""Cross-process locks for mutating ledgers and settings transactions.
 
 We deliberately support several loop processes on one expert (resilience,
 teams, manual runs beside a daemon). That makes every read-modify-write file
@@ -12,13 +12,66 @@ O_EXCL creation is the atomic claim; a lock older than `stale` seconds is
 broken (its owner is dead or wedged — liveness probes lie on Windows, age
 does not); waiting longer than `timeout` raises rather than deadlocks.
 Critical sections here are milliseconds, so contention is rare and short.
+For transactions that must retain exclusion while a live owner is paused,
+advisory_holding uses an OS lock without age-based takeover instead.
 """
 
+import errno
 import os
 import random
 import time
 import uuid
 from contextlib import contextmanager
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+
+@contextmanager
+def advisory_holding(path, timeout=20.0):
+    """Hold a persistent <path>.lock through the OS, without age takeover.
+
+    Keep its inode and first byte stable: never truncate, replace, or unlink
+    this file. Separate opens contend even within one process. The kernel
+    releases exclusion on descriptor close/process death, including a crash;
+    a paused live owner keeps it regardless of lock-file timestamps.
+    """
+    lock = path + ".lock"
+    deadline = time.monotonic() + timeout
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        while True:
+            try:
+                # Windows locks a byte range. Concurrent first creators may
+                # both initialize byte zero; neither truncates or appends.
+                if os.fstat(fd).st_size == 0:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"lock busy: {lock}") from exc
+                time.sleep(min(remaining, 0.02 + random.random() * 0.06))
+        try:
+            yield
+        finally:
+            os.lseek(fd, 0, os.SEEK_SET)
+            if os.name == "nt":
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _token():
