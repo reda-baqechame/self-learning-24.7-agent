@@ -1939,8 +1939,21 @@ class Agent:
 
     def _exec_tool(self, task, name, args):
         if name in ('computer_open','computer_observe','computer_click'):
-            role_tools=self.role_cfg(task['role']).get('tools')
+            import fileauth
+            try:
+                path=fileauth.resolve(self.root,'settings.toml','read','harness')
+                with open(path,'rb') as f: roles=tomllib.load(f).get('roles',{})
+                role=roles.get(task['role'],roles.get('default'))
+                if not isinstance(role,dict): raise ValueError('current owner role missing')
+                role_tools=role.get('tools')
+                if role_tools is not None and (not isinstance(role_tools,list)
+                        or any(not isinstance(t,str) for t in role_tools)):
+                    raise ValueError('invalid current owner tool policy')
+            except Exception:
+                self.close_computers('owner role policy unavailable',task['id'])
+                raise
             if role_tools is not None and name not in role_tools:
+                self.close_computers('owner role policy revoked',task['id'])
                 return 'ERROR: computer tool denied for role'
             import computersession
             import computeruse
@@ -4506,11 +4519,15 @@ class Agent:
             if task_id is None or identity==task_id:
                 try:
                     session.close(reason)
-                except Exception as error:
+                except BaseException as error:
                     errors.append(error)
                 else:
                     del self._computer_sessions[identity]
-        if errors: raise ExceptionGroup('owned computer cleanup unproven',errors)
+        for error in errors:
+            if isinstance(error,(KeyboardInterrupt,SystemExit)):
+                if len(errors)>1: error.add_note('Additional owned cleanup failures: '+str(len(errors)-1))
+                raise error
+        if errors: raise BaseExceptionGroup('owned computer cleanup unproven',errors)
 
     def run(self, drain=False):
         try:

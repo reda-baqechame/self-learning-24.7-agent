@@ -221,3 +221,132 @@ Remaining concerns / qualification limits:
 - Existing README historical CI-green/112-test prose is not evidence for this
   tree. The pre-correction generated evidence summary discrepancy and native-path
   provider fixture portability are explicitly handed to Task 6, not silently fixed.
+
+## Review fix round 1 (base bcc1d547170827b9ca7ba3f3d1fef5bcfd816172)
+
+DONE_WITH_CONCERNS, ready for controller re-review. Six findings addressed under the same scope;
+no full repo suite, production, paid provider, other-worktree or protected-file
+changes are authorized. TDD/debug/verification skills reread before task actions.
+
+`AGENT_TEST_TMP=C:\tmp\c5-r1 PYTHONUTF8=1 python tests/test_computer_session.py`
+with these exact seven unittest arguments (captured `task-5-r1-red.log`):
+`Sessions.test_failed_recovery_quarantines_server_across_lineages
+Sessions.test_public_role_revocation_reloads_actual_settings
+Sessions.test_mcp_source_disappearance_cannot_inherit_identical_fallback
+Sessions.test_system_interruption_still_closes_other_sessions
+Sessions.test_docker_endpoint_environment_refuses_before_spawn
+Sessions.test_posix_cleanup_contract_preserves_identity_and_requires_absence
+Sessions.test_posix_exit_observation_does_not_reap_leader`:
+6 failures / 3 errors in 2.687s. Quarantine across lineage,
+actual role-file revocation, same-content fallback config source and interrupt
+cleanup failed; POSIX non-reaping/closure helpers absent. Docker's initial test
+also held a failed-start lease, causing cleanup errors; isolated each selector's
+root and reran its constructor boundary: four expected failures in 0.169s
+(`task-5-r1-docker-red.log`), no child spawned.
+
+First focused correction attempt: 5 pass / 2 errors (local fileauth import shadow,
+Windows lacks SIGKILL for simulated POSIX syscall test). Corrected local import
+and explicit simulated constant. Same seven methods: **7 PASS, 4.645s**, captured
+`task-5-r1-green-2.log`. This covers durable server quarantine and source pinning,
+actual public role reload and cleanup-all system interruption. POSIX checks are
+simulated syscall contracts on Windows, not native POSIX proof. Docker daemon
+endpoint/identity binding remains a separate RED/GREEN step below.
+
+- Daemon-binding RED: `python tests/test_computer_session.py
+  Sessions.test_docker_cleanup_is_bound_to_launch_daemon`, two subtest failures
+  in 0.084s: default daemon B's absence falsely closed A; replacement daemon did
+  not refuse. GREEN after explicit local endpoint/private config/daemon-ID pins:
+  1 PASS, 0.087s. Logs `task-5-r1-daemon-red.log` / `task-5-r1-daemon-green.log`.
+- `AGENT_TEST_TMP=C:\tmp\c5-r1 AGENT_COMPUTER_LIVE=1 PYTHONUTF8=1 python
+  tests/test_computer_session.py`: **29 PASS, 35.022s**, captured
+  `task-5-r1-session-green.log`, including actual pinned network-none Chromium.
+  This run predates the later native-only and quarantine-storage interaction tests.
+- Pinned image Python probe: uniquely named `agent-c5-posix-probe-<uuid>` container,
+  `run --rm --init --network=none --read-only --entrypoint sh <pinned image>
+  -c 'command -v python3'`: exit 127, no Python path. Exact owned-name final cleanup
+  and container readback empty. No image pull, install, network or provider call.
+  Native POSIX execution remains NOT_RUN here; a POSIX-only exited-leader/real
+  descendant regression is included and explicitly skips on Windows.
+- `AGENT_TEST_TMP=C:\tmp\c5-r1 AGENT_COMPUTER_LIVE=0 PYTHONUTF8=1 python
+  mutate_check.py 'computer review:'`: **8 caught, 0 missed, 0 skipped**,
+  captured `task-5-r1-mutations.log`. Durations: lineage ownership 24s, default
+  daemon 26s, daemon-ID precheck 32s, cached role 32s, config source 24s,
+  system interruption 24s, POSIX reaping 25s, group readback 24s. Source restored.
+- Narrow self-review interaction RED: quarantine storage failure replaced
+  KeyboardInterrupt with OSError. Reproduced first at quarantine helper, then
+  at actual `_save_owner` storage boundary (0.575s, one error;
+  `task-5-r1-interaction-red-2.log`). Preserve original interruption and attach
+  a diagnostic note; pre-spawn ownership/environment remains durable. Focused
+  interaction + quarantine + cleanup-all: **3 PASS, 2.664s**
+  (`task-5-r1-interaction-green.log`). Ninth mutation added, registry now 115.
+- `AGENT_TEST_TMP=C:\tmp\c5-r1 AGENT_COMPUTER_LIVE=0 PYTHONUTF8=1 python
+  mutate_check.py 'computer review interaction:'`: **1 caught, 0 missed,
+  0 skipped**, 23s (`task-5-r1-interaction-mutation.log`). All nine new review
+  mutations caught; this does not claim all 115 registered mutations ran.
+
+### Round 1 final restored-source verification and review
+
+Set `AGENT_TEST_TMP=C:\tmp\c5-r1-final`, `AGENT_COMPUTER_LIVE=1`,
+`PYTHONUTF8=1`; sequentially run `python` with each of the following scripts,
+capture every stream with PowerShell `Tee-Object -Append
+.superpowers/sdd/2026-09-07-computer-use-reliability/task-5-r1-final-focused.log`,
+count nonzero command exits, and exit that count. Aggregate command exit **0**.
+No simultaneous edits or mutation tests ran during this restored-source batch.
+
+- `tests/test_computer_session.py`: 31 run, **30 PASS / 1 explicit native POSIX
+  SKIP**, 31.221s. Includes real pinned Chromium and owned-container readback.
+- `tests/test_computeruse.py`: 16 PASS, 0.435s.
+- `tests/test_mcp_hardening.py`: 15 PASS, 1.752s.
+- `tests/test_harness.py`: PASS, real role/lifecycle integrations.
+- `tests/test_providers.py`: PASS, native-backslash root; unchanged provider code.
+- `tests/test_invariants.py`: PASS, 121 modules / 158 acceptance files, zero raw
+  execution bypasses, 19 declared platform internals.
+- `tests/test_ledger_defects.py`: PASS, 158 tests / 115 mutations in public counts.
+- `tests/test_computeruse_live.py`: all 17 local synthetic Chromium cases PASS.
+- `git diff --check`: PASS. Read-only mutation anchor check: all 24 Task 5
+  anchors occur exactly once; total registry 115. No new module or acceptance
+  file was added in this round, so tests/run_all.py, evidence.py and current
+  architecture counts require no further changes.
+
+Self-review checked the interactions between server ownership and lineage
+terminalization, source changes and active lease cleanup, fresh role denial,
+daemon selection and owner-environment changes, exception ordering and durable
+quarantine, and POSIX leader/group identity. The extra quarantine-storage failure
+regression is the concrete issue found during this interaction review.
+
+Finding disposition:
+
+1. Server-keyed ownership/environment record is consulted under the existing
+   advisory lease. Failed construction cannot shed exclusion by changing
+   lineage; verified cleanup terminalizes its recorded ledger before clearing.
+   Unattributed legacy environments conservatively require owner intervention;
+   no unsafe automatic ownership migration is attempted.
+2. Forwarded DOCKER_* selectors/non-local endpoints refuse before launch.
+   Resolved executable, local endpoint, private empty config and daemon ID are
+   pinned and checked for cleanup, including identity readback after absence.
+   Actual pinned Chromium passes; daemon switching/replacement is simulated
+   boundary evidence, not a live daemon-failover claim.
+3. Direct public tools reload actual settings.toml role permissions; revocation
+   denies and closes an active session. No global Agent configuration mutation.
+4. Resolved MCP source path, physical path and raw-content digest are bound.
+   Removing that source refuses identical effective fallback content.
+5. Cleanup attempts every session for BaseException. KeyboardInterrupt/SystemExit
+   is preserved after attempts; additional failures are noted. A storage failure
+   cannot hide the original interruption or erase prior durable ownership.
+6. POSIX waitid WNOWAIT retains leader identity until group signal, then bounded
+   independent group-absence readback is required. Unsupported primitives fail
+   before child spawn; lingering/unproven groups retain quarantine. Contract
+   checks ran on Windows; native POSIX fixture is included but skipped here.
+
+Remaining qualification: native POSIX/OS-Python CI, full final Task 6 suite and
+controller re-review. No new full repo suite was run; the earlier failed full
+log remains unchanged. Existing origin/network, detached POSIX child, business
+verification and power-loss limits above still apply. No providers, production,
+push/merge, other worktree, or Task 6 files were changed.
+
+Round 1 scoped files: computersession.py, computerprocess.py, mcp.py, loop.py,
+tests/test_computer_session.py, mutate_check.py, README.md, design document and
+this report. Protected dirty file SHA256 rechecked unchanged immediately before
+handoff: mock_effect_server.py
+`7CA5E3E55BAE18A1E7FE04E06ECBDAB8CC2174F01C812538F8FBF5D6BDDFB2BF`;
+ui.html `E7E050E58A9E5D39FC8919FD6D10DC65F7DA1190C5680DEC6502CDCBB6086BBF`.

@@ -100,3 +100,32 @@ Limits retained: the top-level allowed origin is not network containment; the
 observer/action vocabulary is bounded to the invoice-link family. Image metadata
 is retained and revalidated, but provider-specific image budget/accounting and
 model image transport remain outside this increment.
+
+### Review-round ownership and cleanup boundaries
+
+Every server lease now has a durable server-keyed ownership/environment record,
+independent of task lineage. Failed construction releases its OS lock only after
+persisted ownership can quarantine every later claimant. Cleanup uncertainty
+retains that record; only independently confirmed closure clears it. Unattributed
+legacy environments fail closed for owner intervention, not guessed migration.
+Public computer tools reload the current settings role grant on every entry.
+MCP sessions also pin the resolved configuration source path and raw bytes;
+removing the source cannot silently inherit identical effective fallback content.
+Finalization attempts all sessions for BaseException failures before preserving
+KeyboardInterrupt/SystemExit or raising an aggregate failure.
+
+Owned Docker rejects forwarded DOCKER_* selectors and non-local endpoints. It
+pins the resolved executable, local context endpoint, a private empty --config,
+and daemon ID; explicit --host is reused for cleanup and container readback.
+Identity mismatch refuses before removal, and post-readback identity is checked.
+No absence on the mutable default daemon is accepted as owned closure. Docker's
+[CLI precedence](https://docs.docker.com/reference/cli/docker/) and
+[context selection](https://docs.docker.com/engine/manage-resources/contexts/)
+inform this binding; deterministic daemon-switch tests are not live failover proof.
+
+POSIX exit observation uses waitid WNOWAIT, preserving the child/group leader
+until killpg is issued. Reaping the leader is followed by bounded group-absence
+readback; lingering groups, unsupported primitives and uncertainty refuse closure.
+[Python waitid documentation](https://docs.python.org/3/library/os.html#os.waitid)
+defines the non-reaping contract. Windows tests simulate this syscall boundary;
+a separate native POSIX test remains explicitly skipped until run on POSIX.

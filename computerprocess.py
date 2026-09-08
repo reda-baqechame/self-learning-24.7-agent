@@ -9,6 +9,7 @@ import ctypes
 import json
 import os
 import queue
+import shutil
 import signal
 import stat
 import subprocess
@@ -17,6 +18,63 @@ import threading
 import time
 
 import fileauth
+
+
+def validate_configuration(spec):
+    """Owned Docker supports a pinned local daemon, never forwarded selectors."""
+    import mcp
+    if os.path.basename(str(spec.get('cmd',''))).lower() not in ('docker','docker.exe'): return
+    if any(k.upper().startswith('DOCKER_') for k in mcp.server_environment(spec)):
+        raise ValueError('owned Docker endpoint/config environment selectors unsupported')
+    argv=list(spec.get('args') or [])
+    if (not argv or argv[0]!='run' or '--rm' not in argv or '--network=none' not in argv
+            or any(a in ('--host','--context','--config','-H') or a.startswith(('--host=','--context=','--config=','-H')) for a in argv)):
+        raise ValueError('owned Docker requires local run --rm --network=none without endpoint selectors')
+
+
+def _posix_exited(child):
+    # WNOWAIT retains the leader PID/group identity even if it has exited.
+    return os.waitid(os.P_PID,child.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT) is not None
+
+
+def _posix_stop(child):
+    # Never reap the group leader before issuing the group termination signal.
+    try: os.killpg(child.pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+    child.wait(timeout=3)
+    deadline=time.monotonic()+3
+    while True:
+        try: os.killpg(child.pid,0)
+        except ProcessLookupError: return
+        if time.monotonic()>=deadline:
+            raise RuntimeError('owned POSIX group closure unproven')
+        time.sleep(.03)
+
+
+def _docker_prefix(root,docker):
+    # Explicit CLI selectors outrank mutable current-context configuration.
+    config=fileauth.resolve(root,docker['config'],'read','harness')
+    import computeruse
+    computeruse._no_links(config)
+    if os.listdir(config): raise RuntimeError('owned Docker configuration changed')
+    return [docker['executable'],'--config',config,'--host',docker['endpoint']]
+
+
+def _docker_identity(command):
+    import mcp
+    result=subprocess.run(command+['info','--format','{{.ID}}'],capture_output=True,text=True,
+                          timeout=15,env=mcp.server_environment({}))
+    identity=result.stdout.strip()
+    if result.returncode or not identity or len(identity)>200:
+        raise RuntimeError('owned local Docker daemon identity unavailable')
+    return identity
+
+
+def _docker_verified(root,docker):
+    command=_docker_prefix(root,docker)
+    if _docker_identity(command)!=docker['daemon_id']:
+        raise RuntimeError('owned Docker daemon identity changed; cleanup unproven')
+    return command
 
 
 def _windows():
@@ -137,11 +195,11 @@ def cleanup(root,rel):
             raise RuntimeError('container startup ambiguous: no owned cidfile')
         if len(cid)!=64 or any(c not in '0123456789abcdef' for c in cid):
             raise RuntimeError('invalid owned container identity')
-        command=[docker['executable']]
+        command=_docker_verified(root,docker)
         subprocess.run(command+['rm','-f',cid],capture_output=True,text=True,timeout=15,env=mcp.server_environment({}))
         # A missing container is fine only when daemon readback is available.
         check=subprocess.run(command+['container','ls','-a','--no-trunc','--filter','id='+cid,'--format','{{.ID}}'],capture_output=True,text=True,timeout=15,env=mcp.server_environment({}))
-        if check.returncode or check.stdout.strip():
+        if check.returncode or check.stdout.strip() or _docker_identity(command)!=docker['daemon_id']:
             raise RuntimeError('owned container closure could not be confirmed')
     data['state']='closed'
     fileauth.write_json(root,rel,data,actor='harness')
@@ -150,6 +208,7 @@ def cleanup(root,rel):
 def command(spec,root,rel):
     """Wrap owner-reviewed argv; reject remote/attached Docker invocations."""
     argv=[spec['cmd']]+list(spec.get('args') or [])
+    validate_configuration(spec)
     if spec.get('shell'): raise ValueError('owned computer process requires argv without shell')
     data=read(root,rel)
     if os.path.basename(str(argv[0])).lower() in ('docker','docker.exe'):
@@ -158,8 +217,24 @@ def command(spec,root,rel):
             raise ValueError('owned Docker requires run --rm --network=none and runtime-owned name/cidfile')
         cidrel=rel+'.cid'
         cidpath=fileauth.resolve(root,cidrel,'write','harness')
-        data['docker']={'executable':argv[0],'cidfile':cidrel}
+        import mcp
+        executable=shutil.which(argv[0],path=mcp.server_environment(spec).get('PATH'))
+        if not executable: raise ValueError('owned Docker executable unavailable')
+        executable=os.path.realpath(executable)
+        selected=subprocess.run([executable,'context','inspect','--format','{{json .Endpoints.docker.Host}}'],
+            capture_output=True,text=True,timeout=15,env=mcp.server_environment(spec))
+        if selected.returncode: raise RuntimeError('local Docker context unavailable')
+        endpoint=json.loads(selected.stdout)
+        if (not isinstance(endpoint,str) or not endpoint.startswith(('unix:///','npipe:////./pipe/'))
+                or '\n' in endpoint or '\0' in endpoint):
+            raise ValueError('owned Docker supports local socket or named-pipe endpoints only')
+        configrel=rel+'.docker-config'
+        config=fileauth.resolve(root,configrel,'write','harness'); os.mkdir(config)
+        data['docker']={'executable':executable,'cidfile':cidrel,'endpoint':endpoint,'config':configrel}
+        prefix=_docker_prefix(root,data['docker'])
+        data['docker']['daemon_id']=_docker_identity(prefix)
         argv[2:2]=['--cidfile='+cidpath,'--name=agent-computer-'+data['token']]
+        argv=prefix+argv[1:]
         fileauth.write_json(root,rel,data,actor='harness')
     return [sys.executable,os.path.abspath(__file__),root,rel,'--']+argv
 
@@ -169,6 +244,8 @@ def supervise(root,rel,argv):
     job=None
     if os.name=='nt':
         job=_job_create(data['job'])
+    elif not all(hasattr(os,name) for name in ('waitid','WNOWAIT','WEXITED','WNOHANG','P_PID')):
+        raise RuntimeError('non-reaping process identity observation unavailable; refuse before spawn')
     data.update(state='ready',group=os.getpid())
     fileauth.write_json(root,rel,data,actor='harness')
     child=subprocess.Popen(argv,stdin=subprocess.PIPE,stdout=sys.stdout.buffer,
@@ -191,7 +268,8 @@ def supervise(root,rel,argv):
     threading.Thread(target=receive,daemon=True).start()
     threading.Thread(target=forward,daemon=True).start()
     while not ended.wait(.05):
-        if child.poll() is not None or os.path.exists(fileauth.resolve(root,rel+'.stop','read','harness')): break
+        exited=child.poll() is not None if os.name=='nt' else _posix_exited(child)
+        if exited or os.path.exists(fileauth.resolve(root,rel+'.stop','read','harness')): break
     # Docker daemon resources are outside the process job/group.
     if data.get('docker'):
         # Cleanup performs readback before terminating this supervisor's job.
@@ -199,14 +277,14 @@ def supervise(root,rel,argv):
         try:
             cid=_cid(root,data['docker']['cidfile'])
             if len(cid)==64 and all(c in '0123456789abcdef' for c in cid):
-                subprocess.run([data['docker']['executable'],'rm','-f',cid],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
-        except (OSError,subprocess.TimeoutExpired): pass
+                import mcp
+                subprocess.run(_docker_verified(root,data['docker'])+['rm','-f',cid],stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,timeout=15,env=mcp.server_environment({}))
+        except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired): pass
     if os.name=='nt':
         k,_,_=_windows(); k.CloseHandle(job)  # last handle kills self and descendants
     else:
-        try: os.killpg(child.pid,signal.SIGKILL)
-        except ProcessLookupError: pass
-        child.wait(timeout=3)
+        _posix_stop(child)
         data['state']='process_closed' if data.get('docker') else 'closed'
         fileauth.write_json(root,rel,data,actor='harness')
 

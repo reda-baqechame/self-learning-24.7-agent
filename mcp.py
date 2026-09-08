@@ -86,11 +86,19 @@ def find_config(root):
 
 
 def load_servers(root):
+    return config_snapshot(root)[0]
+
+
+def config_snapshot(root):
+    """Load one exact source and its physical/content identity together."""
     p = find_config(root)
     if not p:
-        return {}
-    with open(p, "r", encoding="utf-8-sig") as f:
-        return (json.load(f).get("servers") or {})
+        return {}, None
+    with open(p, "rb") as f:
+        raw=f.read()
+    source={'path':os.path.abspath(p),'physical':os.path.realpath(p),
+            'sha256':hashlib.sha256(raw).hexdigest()}
+    return (json.loads(raw.decode('utf-8-sig')).get('servers') or {}),source
 
 
 class Server:

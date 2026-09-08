@@ -45,6 +45,7 @@ class ComputerSession:
         self.authority = C.BrowserAuthority(self.origin, session_id=self.epoch)
         self._context = {'task_id':self.task_id, 'lineage':self.lineage}
         self._rel = 'effects/computer/'+_digest([self.lineage,server_name])+'.json'
+        self._owner_rel='effects/computer/server-'+_digest(server_name)+'.json'
         path = fileauth.resolve(self.root, self._rel, 'write', 'harness')
         os.makedirs(os.path.dirname(path), exist_ok=True)
         lease_rel = 'effects/computer/'+_digest(server_name)+'.lease'
@@ -58,11 +59,18 @@ class ComputerSession:
         try:
             self._recover()
         except BaseException:
-            self.close('construction failed')
+            # No usable instance escapes construction. Durable quarantine,
+            # not an in-memory context manager, must exclude later lineages.
+            self.state='tainted'
+            self._lease.__exit__(None,None,None); self._lease=None
             raise
 
     def _configuration(self):
-        spec = mcp.load_servers(self.root).get(self.server_name)
+        servers,source=mcp.config_snapshot(self.root)
+        if hasattr(self,'_source') and source!=self._source:
+            raise C.Refused('owner MCP configuration source changed')
+        self._source=source
+        spec = servers.get(self.server_name)
         if not isinstance(spec,dict) or not mcp._role_allowed(spec,self.role):
             raise C.Refused('owner server is missing or role is denied')
         policy = spec.get('computer_policy')
@@ -85,6 +93,7 @@ class ComputerSession:
             raise C.Refused('attached browsers and persistent external profiles are unsupported')
         if any('playwright' in a for a in arguments) and not any('--isolated' in a.split() for a in arguments):
             raise C.Refused('task-owned Playwright requires an isolated browser profile')
+        computerprocess.validate_configuration(spec)
         return spec
 
     def _boundary(self, mutation=False):
@@ -137,16 +146,62 @@ class ComputerSession:
         return bool(action.get('reconciliations'))
 
     def _recover(self):
-        data=self._load()
-        environment=data.get('environment')
+        owner_path=fileauth.resolve(self.root,self._owner_rel,'read','harness')
+        if os.path.exists(owner_path):
+            owner=computerprocess.read(self.root,self._owner_rel)
+        else:
+            # Pre-server-record runtime state cannot safely be assigned to a
+            # different lineage. Do not guess who owns legacy environments.
+            directory=os.path.dirname(owner_path)
+            owners=[]; legacy=[]
+            for name in os.listdir(directory):
+                if not name.endswith('.json') or name.startswith('process-'): continue
+                record=computerprocess.read(self.root,'effects/computer/'+name)
+                (owners if name.startswith('server-') else legacy).append(record)
+            bound={o.get('environment') for o in owners}
+            unbound=any(x.get('environment') and x['environment'] not in bound for x in legacy
+                        if x.get('environment') and computerprocess.read(self.root,x['environment']).get('state')!='closed')
+            owner={'server':self.server_name,'state':'quarantined' if unbound else 'closed',
+                   'environment':None,'ledger':self._rel,'unattributed':unbound}
+            self._save_owner(owner)
+        if owner.get('server')!=self.server_name or owner.get('unattributed'):
+            raise C.Refused('server ownership unavailable; independent owner cleanup required')
+        environment=owner.get('environment')
         if environment:
-            computerprocess.cleanup(self.root,environment)
+            try:
+                computerprocess.cleanup(self.root,environment)
+                self._terminalize(owner['ledger'])
+            except BaseException as error:
+                self._quarantine(error)
+                raise
+            owner.update(state='closed',environment=None)
+            self._save_owner(owner)
+        self._terminalize(self._rel)
+
+    def _save_owner(self,owner):
+        fileauth.write_json(self.root,self._owner_rel,owner,actor='harness',durable=True)
+
+    def _quarantine(self,original):
+        try:
+            owner=computerprocess.read(self.root,self._owner_rel)
+            owner['state']='quarantined'; self._save_owner(owner)
+        except BaseException as persistence_error:
+            # The pre-spawn durable environment still requires cleanup for
+            # every claimant. Preserve system interruption even if disk fails.
+            original.add_note('Quarantine refresh failed: '+type(persistence_error).__name__)
+
+    def _terminalize(self,relative):
+        if not relative.startswith('effects/computer/') or not relative.endswith('.json'):
+            raise C.Refused('invalid owned action ledger')
+        path=fileauth.resolve(self.root,relative,'read','harness')
+        if not os.path.exists(path): return
+        data=computerprocess.read(self.root,relative)
         for action in data['actions']:
             if action['state']=='PREPARED':
                 action.update(state='FAILED_WITH_KNOWN_NO_EFFECT',reason='owner terminated before dispatch')
             elif action['state']=='DISPATCHED':
                 action.update(state='UNKNOWN',reason='owner terminated before independent verification')
-        self._save(data)
+        fileauth.write_json(self.root,relative,data,actor='harness',durable=True)
 
     def _prepare(self, operation, intent):
         self._boundary(mutation=True)
@@ -191,12 +246,15 @@ class ComputerSession:
             environment='effects/computer/process-'+self.epoch+'.json'
             fileauth.write_json(self.root,environment,{'state':'created','token':self.epoch,
                 'job':'Local\\agent-computer-'+self.epoch},actor='harness')
+            self._save_owner({'server':self.server_name,'state':'owned','environment':environment,
+                              'ledger':self._rel,'task':self.task_id,'lineage':self.lineage,'epoch':self.epoch})
             data=self._load(); data['environment']=environment; self._save(data)
             try:
                 self.server=mcp.connect(self.root,self.server_name,role=self.role,
                                         owned_process=(self.root,environment))
-            except BaseException:
+            except BaseException as error:
                 self.state='tainted'
+                self._quarantine(error)
                 raise
             self.state='active'
 
@@ -314,8 +372,9 @@ class ComputerSession:
             try:
                 if self.server is not None: self.server.close()
                 if self._lease is not None: self._recover()
-            except BaseException:
+            except BaseException as error:
                 self.state='tainted'
+                self._quarantine(error)
                 raise
             else:
                 if self._lease is not None:

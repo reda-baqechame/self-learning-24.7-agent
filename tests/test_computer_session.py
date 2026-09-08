@@ -322,7 +322,7 @@ class Sessions(unittest.TestCase):
         print('[navigation-scope] off-origin post-navigation observation cannot be labeled known-no-effect refusal')
 
     def test_empty_role_tool_allowlist_denies_computer_entry(self):
-        agent=self.agent(); agent.cfg['roles']['worker']['tools']=[]
+        agent=self.agent(); (self.root/'settings.toml').write_text('[agent]\n[roles.worker]\ntools=[]\n')
         result=agent.exec_tool(self.task,'computer_open',{'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'})
         self.assertTrue(result.startswith('ERROR:'),result)
         self.assertFalse(agent._computer_sessions)
@@ -395,6 +395,175 @@ class Sessions(unittest.TestCase):
                 finally:
                     if proc.poll() is None: proc.kill(); proc.wait(timeout=5)
         print('[crash-boundaries] killed real owners recover PREPARED as no-effect and DISPATCHED as UNKNOWN; owned environment closure confirmed')
+
+    def test_failed_recovery_quarantines_server_across_lineages(self):
+        proc=subprocess.Popen([sys.executable,str(Path(__file__)),'--owner',str(self.root),'prepared'],cwd=HERE)
+        try:
+            wait_file(self.root/'ready'); proc.kill(); proc.wait(timeout=5)
+        finally:
+            if proc.poll() is None: proc.kill(); proc.wait(timeout=5)
+        with patch.object(self.CS.computerprocess,'cleanup',side_effect=RuntimeError('closure unavailable')):
+            with self.assertRaises(RuntimeError): self.session()
+            with self.assertRaises(RuntimeError): self.session(dict(self.task,id='foreign',lineage='foreign'))
+        # The failed constructor has no usable instance. A later claimant must
+        # independently prove closure before its different lineage can proceed.
+        recovered=self.session(dict(self.task,id='foreign',lineage='foreign'))
+        recovered.open('https://example.com/'); recovered.close('test')
+        old=self.session()
+        self.assertEqual([a['state'] for a in old.actions() if a['operation']=='click'],['FAILED_WITH_KNOWN_NO_EFFECT'])
+        print('[server-quarantine] failed construction persists server ownership across lineage changes until independent cleanup succeeds')
+
+    def test_public_role_revocation_reloads_actual_settings(self):
+        agent=self.agent()
+        agent.exec_tool(self.task,'computer_open',{'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'})
+        session=agent._computer_sessions[self.task['id']]
+        (self.root/'settings.toml').write_text('[agent]\n[roles.worker]\ntools=[]\n')
+        result=agent.exec_tool(self.task,'computer_observe',{})
+        self.assertTrue(result.startswith('ERROR:'),result)
+        self.assertEqual(session.state,'closed')
+        self.assertIsNotNone(session.server.proc.poll())
+        print('[fresh-role-policy] changing the owner settings file revokes the next direct public call and closes its session')
+
+    def test_mcp_source_disappearance_cannot_inherit_identical_fallback(self):
+        fleet=self.root; self.root=fleet/'experts'/'task'; self.root.mkdir(parents=True)
+        self.spec['args'][-1]=str(self.root); self.spec['trust_identity']=mcp.server_identity(self.spec)
+        self.config(); (fleet/'mcp.json').write_bytes((self.root/'mcp.json').read_bytes())
+        s=self.session(); s.open('https://example.com/')
+        (self.root/'mcp.json').unlink()
+        with self.assertRaises(C.Refused): s.observe()
+        self.assertIsNotNone(s.server.proc.poll())
+        print('[configuration-source] deleting pinned local config refuses identical-content fleet fallback')
+
+    def test_system_interruption_still_closes_other_sessions(self):
+        agent=self.agent()
+        (self.root/'mcp.json').write_text(json.dumps({'servers':{'fixture':self.spec,'fixture-two':self.spec}}))
+        first=self.session(); first.open('https://example.com/')
+        second=self.CS.ComputerSession(str(self.root),dict(self.task,id='second',lineage='second'),'fixture-two','r1')
+        self.addCleanup(second.close,'test'); second.open('https://example.com/')
+        agent._computer_sessions={self.task['id']:first,'second':second}
+        original=self.CS.computerprocess.cleanup; environment=first._load()['environment']
+        interruption=KeyboardInterrupt('owner interrupt')
+        def interrupted(root,rel):
+            if rel==environment: raise interruption
+            return original(root,rel)
+        with patch.object(self.CS.computerprocess,'cleanup',side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt) as raised: agent.close_computers('stop')
+        self.assertIs(raised.exception,interruption)
+        self.assertEqual(first.state,'tainted'); self.assertEqual(second.state,'closed')
+        print('[system-interruption-cleanup] KeyboardInterrupt is preserved only after every later owned session is attempted')
+
+    def test_quarantine_write_failure_does_not_mask_system_interruption(self):
+        s=self.session(); s.open('https://example.com/')
+        interruption=KeyboardInterrupt('owner interrupt')
+        with patch.object(self.CS.computerprocess,'cleanup',side_effect=interruption), patch.object(s,'_save_owner',side_effect=OSError('storage unavailable')):
+            with self.assertRaises(KeyboardInterrupt) as raised: s.close('stop')
+        self.assertIs(raised.exception,interruption)
+        self.assertEqual(s.state,'tainted')
+        self.assertTrue(self.CS.computerprocess.read(str(self.root),s._owner_rel)['environment'])
+        print('[interrupt-primary] failure to refresh quarantine cannot mask system interruption; prior durable environment still excludes new claimants')
+
+    def test_docker_endpoint_environment_refuses_before_spawn(self):
+        for selector in ('DOCKER_HOST','DOCKER_CONTEXT','DOCKER_CONFIG','DOCKER_TLS_VERIFY'):
+            with self.subTest(selector=selector):
+                self.root=Path(self.temp.name)/selector; self.root.mkdir()
+                self.spec.update(cmd='docker',args=['run','--rm','--network=none','fixture'],env={selector:'unsupported'})
+                self.spec['trust_identity']=mcp.server_identity(self.spec); self.config()
+                started=[]
+                def launch(*args,**kwargs): started.append(True); raise RuntimeError('unexpected spawn')
+                with patch.object(subprocess,'Popen',side_effect=launch):
+                    with self.assertRaises(ValueError): self.session()
+                self.assertFalse(started,'endpoint selector reached process launch')
+        print('[docker-endpoint-policy] forwarded endpoint/context/config/TLS selectors refuse before any subprocess launch')
+
+    def test_posix_cleanup_contract_preserves_identity_and_requires_absence(self):
+        process=self.CS.computerprocess
+        self.assertTrue(callable(getattr(process,'_posix_stop',None)),'POSIX group closure primitive missing')
+        calls=[]
+        class Child:
+            pid=12345
+            def wait(inner,timeout):
+                self.assertEqual(calls[0],(12345,process.signal.SIGKILL),'leader reaped before group termination')
+        def signal_group(group,sig):
+            calls.append((group,sig))
+            if sig==0: raise ProcessLookupError()
+        with patch.object(process.os,'killpg',side_effect=signal_group,create=True), patch.object(process.signal,'SIGKILL',9,create=True):
+            process._posix_stop(Child())
+        self.assertIn((12345,0),calls,'no independent group absence readback')
+        with patch.object(process.os,'killpg',return_value=None,create=True), patch.object(process.time,'monotonic',side_effect=[0,10]), patch.object(process.signal,'SIGKILL',9,create=True):
+            with self.assertRaises(RuntimeError): process._posix_stop(Child())
+        print('[posix-contract-only] simulated syscall boundary preserves leader until kill and refuses lingering group; not native POSIX proof')
+
+    def test_posix_exit_observation_does_not_reap_leader(self):
+        process=self.CS.computerprocess
+        self.assertTrue(callable(getattr(process,'_posix_exited',None)),'non-reaping POSIX observation missing')
+        class Child:
+            pid=12345
+            def poll(inner): self.fail('poll reaped leader before group signal')
+        with patch.object(process.os,'waitid',return_value=None,create=True) as observe:
+            with patch.multiple(process.os,P_PID=1,WEXITED=2,WNOHANG=4,WNOWAIT=8,create=True):
+                self.assertFalse(process._posix_exited(Child()))
+                self.assertEqual(observe.call_args.args,(1,12345,14))
+        print('[posix-wait-contract-only] exit observation requests WNOWAIT and never invokes reaping poll')
+
+    def test_docker_cleanup_is_bound_to_launch_daemon(self):
+        import shutil
+        process=self.CS.computerprocess
+        endpoint='npipe:////./pipe/docker_engine' if os.name=='nt' else 'unix:///var/run/docker.sock'
+        for changed_identity in (False,True):
+            with self.subTest(changed_identity=changed_identity):
+                cid='a'*64; containers={'A':{cid},'B':set()}; default=['A']; identities={'A':'daemon-A','B':'daemon-B'}
+                def docker(argv,**kwargs):
+                    daemon='A' if '--host' in argv and argv[argv.index('--host')+1]==endpoint else default[0]
+                    if 'context' in argv and 'inspect' in argv: out=json.dumps(endpoint)
+                    elif 'info' in argv: out=identities[daemon]
+                    elif 'rm' in argv:
+                        containers[daemon].discard(argv[-1]); out=''
+                    elif 'container' in argv and 'ls' in argv: out='\n'.join(containers[daemon])
+                    else: raise AssertionError('unexpected fake daemon request '+repr(argv))
+                    return subprocess.CompletedProcess(argv,0,out,'')
+                relative='effects/computer/process-daemon-'+str(changed_identity)+'.json'
+                path=self.root/relative; path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text(json.dumps({'state':'created','token':'daemon-test','job':'unused-fixture'}))
+                spec={'cmd':'docker','args':['run','--rm','--network=none','fixture']}
+                with patch.object(subprocess,'run',side_effect=docker), patch.object(shutil,'which',return_value=sys.executable), patch.object(process,'_job_stop'):
+                    process.command(spec,str(self.root),relative)
+                    metadata=json.loads(path.read_text()); metadata['state']='process_closed'; path.write_text(json.dumps(metadata))
+                    (self.root/metadata['docker']['cidfile']).write_text(cid)
+                    if changed_identity:
+                        identities['A']='replacement-daemon'
+                        with self.assertRaises(RuntimeError): process.cleanup(str(self.root),relative)
+                        self.assertEqual(containers['A'],{cid},'mismatched daemon received destructive cleanup')
+                        self.assertNotEqual(json.loads(path.read_text())['state'],'closed')
+                    else:
+                        default[0]='B'
+                        process.cleanup(str(self.root),relative)
+                        self.assertFalse(containers['A'],'absence on default daemon B was incorrectly called closure of A')
+        print('[daemon-binding-contract] simulated daemon switch cannot redirect cleanup; changed daemon ID refuses before removal, not live daemon-failover proof')
+
+    @unittest.skipIf(os.name=='nt','native POSIX process-group qualification requires POSIX host')
+    def test_native_posix_exited_leader_and_descendant_cleanup(self):
+        process=self.CS.computerprocess; marker=self.root/'posix-descendant'
+        descendant='import pathlib,time,sys; p=pathlib.Path(sys.argv[1]); [(p.open("ab").write(b"x"),time.sleep(.05)) for _ in range(100)]'
+        leader='import subprocess,sys; subprocess.Popen([sys.executable,"-c",sys.argv[1],sys.argv[2]])'
+        child=subprocess.Popen([sys.executable,'-c',leader,descendant,str(marker)],start_new_session=True)
+        try:
+            wait_file(marker)
+            deadline=time.monotonic()+3
+            while not process._posix_exited(child):
+                if time.monotonic()>deadline: self.fail('leader did not exit')
+                time.sleep(.02)
+            self.assertIsNone(child.returncode,'leader was reaped before cleanup')
+            process._posix_stop(child)
+            with self.assertRaises(ProcessLookupError): os.killpg(child.pid,0)
+            size=marker.stat().st_size; time.sleep(.2); self.assertEqual(marker.stat().st_size,size)
+        finally:
+            # Signal only while the leader is still our unreaped child. Never
+            # target a stale group ID after the tested cleanup has reaped it.
+            if child.returncode is None:
+                try: os.killpg(child.pid,process.signal.SIGKILL)
+                except ProcessLookupError: pass
+                child.wait(timeout=3)
+        print('[native-posix-closure] exited leader identity retained until termination; independent group absence and descendant stop confirmed')
 
 def owner(root, stage):
     import computersession
