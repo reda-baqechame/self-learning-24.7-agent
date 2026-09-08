@@ -242,7 +242,9 @@ dialogs, 40 px targets.
 | `python replay.py --root <expert> [--task ID]` | re-run a decision against the record |
 | `python benchmark.py run --expert <slug>` | the gated battery used by trials |
 | `python recall.py "query"` | search everything: notes, skills, archived turns |
-| `python mcp.py list\|call <server> <tool>` | MCP client (both protocol eras) |
+| `python mcp.py list\|call <server> <tool>` | MCP client for the verified legacy stdio `2025-06-18` protocol; other eras are not claimed |
+| `python computerbench.py development --opt-in --run-dir <empty> --docker <path>` | run the known synthetic portal fixtures through `ComputerSession`; development evidence only |
+| `python computerbench.py acceptance --pack <external> --pack-seal <external> --owner-trust <external> --results <external> --results-seal <external>` | validate a separately supplied owner-authenticated acceptance contract; without sealed external results, acceptance is false |
 | `python federation.py card\|peers` | A2A identity and peers |
 | `python package.py` | ship a clean zip (no keys, no logs, no contexts) |
 | `python demo.py` | the whole platform, keyless, in one run |

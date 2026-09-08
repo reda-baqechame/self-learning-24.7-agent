@@ -55,3 +55,37 @@ other agents, or a basis for claiming best-in-world computer use.
 
 Native desktop, real-account and live-model quality, uncertain business writes,
 comparative trials and soak/rollback release proof remain separate gates.
+
+## Task 6 development result and acceptance boundary
+
+The corrected deterministic run retained 36 trial receipts and produced the
+preregistered class totals: 12 `verified_completion` (normal, delayed, moved and
+injection, three each), 15 `safe_refusal` (ambiguous, dialog, expired, restart
+and cross-origin, three each) and 9 `rejected_artifacts` (interrupted, corrupt
+and duplicate/missing, three each). Cleanup was independently read back for all
+36 owned containers and no provider was called. An earlier 35/36 run is also
+retained: one moved-layout receipt arrived after movement, and the runner wrongly
+treated a legitimate fresh dispatch as a stale-receipt failure. That failed run
+was not relabelled; the runner gained a sealed-state comparison and a new full
+run used a fresh root.
+
+These are known synthetic development fixtures. `computerbench.py` separately
+defines an external acceptance-pack contract with layout, wording, timing,
+authentication and multistep variants. The pack and results must be supplied
+separately, content-sealed and authenticated by independently supplied owner
+trust outside repository/worker-authored content. The contract freezes model,
+tool, policy, budget, retries and human help; sealed results report steps,
+elapsed time and cost and are rejected when their aggregate exceeds those
+frozen ceilings. It reports browser-only,
+native-desktop and API-assisted tracks separately. No author string or
+self-generated digest establishes independence. No real external pack/results
+were supplied in this task, therefore `acceptance_complete=false` and
+`release_ready=false`.
+
+MCP/API compatibility is not model competence. DOM observation or acknowledged
+input dispatch is not verified business success. The implemented MCP scope is
+the legacy stdio `2025-06-18` protocol only. The observer/action vocabulary is
+the invoice-link family only. Top-level origin validation is not browser-network
+containment; immutable image storage is not model-vision transport; the context
+budget still rejects non-text multimodal input. Native desktop, real-account,
+live-model, soak and rollback evidence remains unproven.

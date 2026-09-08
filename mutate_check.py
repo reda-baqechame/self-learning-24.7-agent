@@ -21,6 +21,48 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("computerbench: repository content self-certifies independence", "computerbench.py",
+     "        return os.path.commonpath((repo, candidate)) != repo",
+     "        return True", "test_computerbench.py",
+     "repository-authored packs must not establish independent acceptance"),
+    ("computerbench: owner HMAC authentication bypassed", "computerbench.py",
+     '    if not hmac.compare_digest(seal["hmac_sha256"], expected):',
+     '    if False:', "test_computerbench.py",
+     "an author string or digest without external owner trust cannot establish independence"),
+    ("computerbench: frozen step budget ignored", "computerbench.py",
+     '        total_steps += row["steps"]',
+     '        total_steps += 0', "test_computerbench.py",
+     "sealed results must remain inside the independently frozen step budget"),
+    ("computerbench: scenario name overrides controller evidence", "computerbench.py",
+     '''    if (outcome == "completed"
+            and case in ("corrupt", "duplicate_missing")):''',
+     '''    if case in ("interrupted", "corrupt", "duplicate_missing"):''',
+     "test_computerbench.py",
+     "unexpected controller/artifact combinations must remain unresolved"),
+    ("computerbench: portal fixture file mounted as a directory", "computerbench.py",
+     '                      "type=bind,source=" + os.fspath(fixture.parent)',
+     '                      "type=bind,source=" + os.fspath(fixture)',
+     "test_computerbench.py", "the exact fixture parent must be the read-only /fixture mount"),
+    ("computerbench: portal readiness probe removed", "computerbench.py",
+     '               "for attempt in $(seq 1 100); do "',
+     '               "for attempt in $(seq 1 0); do "',
+     "test_computerbench.py", "fixture readiness must be bounded and precede MCP startup"),
+    ("computerbench: portal bypasses task-owned runtime", "computerbench.py",
+     '''        current = computersession.ComputerSession(
+            os.fspath(root), task, "portal", "computerbench-dev-v1")
+        sessions.append(current)''',
+     '''        current = mcp.connect(os.fspath(root), "portal")
+        sessions.append(current)''',
+     "test_computerbench.py", "development trials must traverse ComputerSession, never direct MCP"),
+    ("computerbench: moved observation identity ignored", "computerbench.py",
+     '''    return (before["observation"]["state_sha256"]
+            != after["observation"]["state_sha256"])''',
+     '''    return False''', "test_computerbench.py",
+     "a stale click may be attempted only after two sealed observation identities differ"),
+    ("evidence: comma-separated failures truncated", "evidence.py",
+     "            named_failed.update(names)",
+     "            named_failed.add(names[0])", "test_package.py",
+     "every failed test file and exact footer totals must reach generated evidence"),
     ("computer run boundary: cleanup replaces main exception", "loop.py",
      "                primary.add_note('Computer cleanup also failed: '+repr(cleanup))",
      '                raise', "test_computer_session.py", "main cancellation/exit must survive cleanup failure after all sessions are attempted"),
@@ -140,7 +182,21 @@ MUTATIONS = [
     ("mcp image: raced publication cleanup removed", "mcp.py",
      '                        _remove_published_alias(path, temporary)',
      '                        pass',
-     "test_mcp.py", "a last-moment directory swap must leave no outside digest"),
+     "test_mcp.py", "a last-moment directory swap must leave no outside digest",
+     False, None, ("nt", "POSIX publication is directory-fd anchored and never "
+                        "uses the Windows alias-cleanup fallback")),
+    ("mcp image: POSIX directory-fd publication anchor removed", "mcp.py",
+     '''                            os.link(os.path.basename(temporary), name,
+                                    src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
+                                    follow_symlinks=False)''',
+     '''                            os.link(os.path.basename(temporary), name)''',
+     "test_mcp.py", "POSIX source and destination names must use the validated directory descriptor",
+     "Windows has no dir_fd link API; it uses identity revalidation and alias cleanup"),
+    ("mcp image: physical root alias canonicalization removed", "mcp.py",
+     '    root_real = os.path.realpath(root or ".")',
+     '    root_real = os.path.abspath(root or ".")',
+     "test_mcp.py", "normal and actual 8.3 spellings must reach the same physical read-boundary test",
+     False, None, ("nt", "8.3 short-name aliases are a Windows path-spelling contract")),
     ("mcp image: structured artifact sink dropped", "mcp.py",
      '                    artifacts.append(dict(saved))',
      '                    pass',
@@ -737,6 +793,12 @@ def main():
         required_env = entry[7] if len(entry) > 7 else None
         if required_env and os.environ.get(required_env[0]) != required_env[1]:
             results.append((label, "SKIP", "requires " + "=".join(required_env)))
+            continue
+        platform_only = entry[8] if len(entry) > 8 else None
+        if platform_only and os.name != platform_only[0]:
+            platform = "Windows" if platform_only[0] == "nt" else platform_only[0]
+            results.append((label, "SKIP", platform + "-only: "
+                            + platform_only[1]))
             continue
         if posix_only and os.name == "nt":
             why = posix_only if isinstance(posix_only, str) else \

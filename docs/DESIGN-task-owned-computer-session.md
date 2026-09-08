@@ -99,7 +99,10 @@ and debug state are excluded from distributable archives even when root is `.`.
 Limits retained: the top-level allowed origin is not network containment; the
 observer/action vocabulary is bounded to the invoice-link family. Image metadata
 is retained and revalidated, but provider-specific image budget/accounting and
-model image transport remain outside this increment.
+model image transport remain outside this increment. Immutable storage therefore
+does not prove that any model received or understood the image; the text context
+budget still rejects non-text multimodal input. Native-desktop interaction, real
+accounts, live-model competence, soak and rollback remain separate unproven gates.
 
 ### Review-round ownership and cleanup boundaries
 

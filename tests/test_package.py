@@ -446,6 +446,31 @@ def check_interleaved_logs_cannot_cry_wolf(_work):
         "a failure named by run_all's authoritative tail was laundered "
         "into a pass", sysrep2)
 
+    # A single FAILED line names the complete comma-separated set. The
+    # generator must parse every name and prove its derived totals equal the
+    # authoritative footer; dropping the second name previously published
+    # 155/158 when run_all had said 154/158.
+    second = tests[1]
+    multi = []
+    for t in tests:
+        multi.append(f"=== {t} ===")
+        multi.append(f"PASS {t[:-3]}")
+    multi.append(f"FAILED: {victim}, {second}")
+    multi.append(f"{len(tests)} executed: {len(tests) - 2} passed, 0 skipped, "
+                 "2 failed")
+    rep_multi = evidence.build("\n".join(multi))
+    sys_multi = next(x for x in rep_multi["systems"] if x["system"] == sysname)
+    assert set(sys_multi["tests_failed"]) == {victim, second}, sys_multi
+    assert rep_multi["tests_passed"] == len(tests) - 2, rep_multi
+    inconsistent = multi[:-1] + [
+        f"{len(tests)} executed: {len(tests) - 1} passed, 0 skipped, 1 failed"]
+    try:
+        evidence.build("\n".join(inconsistent))
+    except ValueError as error:
+        assert "authoritative footer" in str(error), error
+    else:
+        raise AssertionError("evidence accepted totals that contradict run_all")
+
     # …and every observation a test DECLARES is counted, whatever its
     # label's shape: "[phase 1]", "[csv->sql]", "[re-exam failure]" are
     # observations; "[skipped: x]" (a colon) is a note, never one. The old
@@ -470,7 +495,8 @@ def check_interleaved_logs_cannot_cry_wolf(_work):
         "grammar", sysrep3["observations"], len(tests) + 3)
     print("[interleave] a green test whose OK drifted under the next "
           "header stays green (verdict from exit codes, observations from "
-          "what could be attributed) — a tail-named failure stays red — "
+          "what could be attributed) — every comma-separated tail failure "
+          "stays red and derived totals must equal the authoritative footer — "
           "and spaced observation labels are counted while colon notes "
           "are not")
 
@@ -676,6 +702,24 @@ def check_the_mutation_harness_cannot_delete_a_real_credential_file(work):
           "did while announcing that it was skipping them")
 
 
+def check_platform_specific_mutations_are_honest(_work):
+    import mutate_check
+
+    entries = {entry[0]: entry for entry in mutate_check.MUTATIONS}
+    cleanup = entries["mcp image: raced publication cleanup removed"]
+    assert len(cleanup) > 8 and cleanup[8][0] == "nt", (
+        "the publication-alias cleanup is a Windows fallback, so running that "
+        "mutation on POSIX would claim coverage of a branch POSIX never uses")
+    anchor = entries["mcp image: POSIX directory-fd publication anchor removed"]
+    assert len(anchor) > 6 and anchor[6], (
+        "the POSIX directory-fd anchor needs its own declared POSIX-only mutation")
+    alias = entries["mcp image: physical root alias canonicalization removed"]
+    assert len(alias) > 8 and alias[8][0] == "nt", (
+        "an actual 8.3 spelling mutation is Windows-only and must say so")
+    print("[mutation-platforms] Windows alias cleanup/8.3 spelling and POSIX "
+          "directory-fd anchoring have distinct, explicit applicability")
+
+
 def main():
     work = tempfile.mkdtemp(prefix="pkg-test-")
     try:
@@ -686,9 +730,11 @@ def main():
         check_the_installers_are_shippable(z)
         check_a_git_clone_lands_every_working_directory(work)
         check_the_mutation_harness_cannot_delete_a_real_credential_file(work)
+        check_platform_specific_mutations_are_honest(work)
         check_a_planted_secret_does_not_ship(work)
         check_evidence_refuses_to_invent(work)
         check_a_skip_is_not_a_failure(work)
+        check_interleaved_logs_cannot_cry_wolf(work)
         print("PASS test_package")
     finally:
         shutil.rmtree(work, ignore_errors=True)

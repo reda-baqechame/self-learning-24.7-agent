@@ -2,7 +2,7 @@
 
 **What this is.** A file-backed, stdlib-only platform for building expert AI
 agents that work continuously, prove what they did, and remember what they
-learned. 121 Python modules, 158 registered acceptance tests, one HTML control panel, no
+learned. 122 Python modules, 159 registered acceptance tests, one HTML control panel, no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 **Who this document is for.** Somebody who has just been handed the
@@ -660,7 +660,7 @@ last one is the only one produced on a computer this project does not own.
 
 ### 10.1 The suite passes — the weakest claim
 
-158 registered acceptance tests, configured for Windows and Linux under
+159 registered acceptance tests, configured for Windows and Linux under
 Python 3.11, 3.12 and 3.13. Actual passes and skips require a run receipt. Each test prints a sentence describing what it
 observed, and those sentences are the report — `EVIDENCE.md` quotes them
 verbatim rather than summarising.
@@ -840,6 +840,7 @@ Stated plainly, because a document that only reports wins is marketing.
 | **Accessibility** | Keyboard reachability, focus order, labels and 40 px targets are in place and asserted. Contrast ratios and screen-reader behaviour have not been checked with a tool |
 | **E2B / Daytona** | The REST client is verified against the documented shape. Neither service has ever received a request from this codebase |
 | **A third-party MCP server** | The transport is real — a spawned subprocess speaking newline-delimited JSON-RPC — but the server on the other end is ours |
+| **Bounded computer-use acceptance or model competence** | The 36 known invoice-portal variants are deterministic development fixtures. They exercise the task-owned browser runtime and external artifact verification, but API compatibility, DOM observation and input dispatch do not prove that a model can complete a business task. No separately supplied external acceptance pack/results, native-desktop track, real account, live model, comparative baseline, soak or rollback exercise has run. The observer remains the invoice-link family; top-level origin checking is not network containment; immutable image storage is not model-vision transport; non-text multimodal context is still rejected. |
 | **Duration** | The soak rules out growth that is O(total work). It cannot rule out a leak that needs days |
 | **Docker beyond two operating systems** | Ubuntu and Windows now, still one image and one daemon version. The Linux run is what revealed that the container had been running as root and handing back a workspace the agent could not write to |
 | **Any machine this has not run on** | This is no longer a theoretical caveat, it is a measured one. The suite was green on one Windows laptop, twice consecutively. The first CI run on Ubuntu and Windows × Python 3.11/3.12/3.13 **failed four of six jobs**, and every failure was a genuine defect — including a task being executed twice by two loops. Reproducing them in a local Linux container found two more. Six defects (U15–U20) were sitting in a codebase that had been audited four times and was passing everything it knew how to ask itself. The suite is green on both platforms now; that is a statement about two platforms |
@@ -847,12 +848,13 @@ Stated plainly, because a document that only reports wins is marketing.
 | **Authentication** | Members hold personal bearer tokens and every write is checked against the role behind the credential — but over plain HTTP, with no TLS, no session and no expiry. This is authorisation given an identity, not an authentication system |
 | **Beauty** | The design gate catches mechanical failures and the fingerprints of unconsidered output. A page can pass every check and still be dull |
 
-**Release gates.** Of the six the engineering manual defines, only the first
-is cleared:
+**Release gates.** The earlier platform baseline cleared its developer gate.
+This bounded-computer-use candidate has not cleared a release gate: independent
+acceptance and current six-job CI inspection remain outside the local run.
 
 | Release | Status |
 |---|---|
-| Developer build | ✅ **CLEARED** — 99 tests twice, harness check exit 0, working tree explained |
+| Developer build | ❌ **NOT CLEARED FOR THIS CANDIDATE** — local development fixtures are not independent acceptance, and current external review/CI evidence is pending |
 | Local owner beta | ❌ P0/P1 fixed and backup/restore tested, but **no real provider has ever been called** |
 | Private cloud beta | ❌ RBAC and audit-by-user exist; authentication is a bearer token over plain HTTP, no secret manager, state is files |
 | Organization pilot | ❌ none of tenant isolation, edge-worker policy, SLO telemetry or 24/7 endurance |
@@ -892,7 +894,8 @@ practice → sealed exam → diagnose → verdict → distill → retest)
 
 **Governance** — `variants.py` `approvals.py` `replay.py` `benchmark.py`
 `modelrouter.py` `org.py` `training.py` `proof.py` `evidence.py` `metrics.py`
-`evalsuite.py` `mutate_check.py`
+`evalsuite.py` `mutate_check.py` `computerbench.py` (development portal trials
+and an external acceptance-pack contract; never a self-certifying benchmark)
 
 **Infrastructure** — `workers.py` `acquire.py` `toolbox.py` `providers.py`
 `mcp.py` `federation.py` `trace.py` `backup.py` `package.py` `preflight.py`
@@ -956,7 +959,7 @@ python loop.py run --drain --root experts/<slug>    # work the queue
 
 ```bash
 python demo.py            # the whole platform, keyless, in one run
-python tests/run_all.py   # 158 registered acceptance tests
+python tests/run_all.py   # 159 registered acceptance tests
 python proof.py           # what is proven, and to what level
 python evidence.py        # why we believe it, and where belief runs out
 python metrics.py         # is it working — and the numbers we refuse to invent

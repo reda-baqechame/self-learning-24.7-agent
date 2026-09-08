@@ -7,8 +7,8 @@ logic it runs, how you interact with it, and what it does **not** do.
 written by reading the code, not from memory; where a claim could rot, the
 test that keeps it honest is named.
 
-**Scale, so you know what you are reading about:** 121 Python modules,
-one HTML file for the whole UI, 158 registered acceptance tests, zero third-party
+**Scale, so you know what you are reading about:** 122 Python modules,
+one HTML file for the whole UI, 159 registered acceptance tests, zero third-party
 dependencies. Python 3.11+ and your own API keys.
 
 ---
@@ -1241,12 +1241,24 @@ runnable / 2 blocked with a numbered list.
 
 ### MCP — `mcp.py`
 
-A client for **both** protocol eras, so old and new servers work. Servers are
+A client verified only for the legacy stdio `2025-06-18` protocol used by this
+repository's fixtures. Compatibility with another MCP protocol era is not
+claimed. Servers are
 declared in an `mcp.json` (§15) with `approval`, `allow_roles`, `allow_tools`,
 `deny_tools`, `require_approval`, `no_approval`. Tool results are fenced like any other untrusted content;
 `isError` is surfaced loudly; a wedged tool times out in seconds; an unknown
 server is refused with the configured list. Destructive tools route through
 approvals. (`test_mcp.py`)
+
+`computerbench.py` keeps two evidence levels separate. Its known 36-case portal
+run is deterministic development coverage through the task-owned
+`ComputerSession`; its external acceptance contract requires a separately
+supplied, content-sealed pack and results authenticated by independent owner
+trust outside worker-authored content. It freezes model, tool, policy, budget,
+retries and human help and labels browser-only, native-desktop and API-assisted
+tracks separately. With no external pack, acceptance stays false. Neither MCP
+API compatibility nor DOM/action dispatch establishes model competence or
+business success. (`test_computerbench.py`)
 
 ### A2A and federation — `federation.py`
 

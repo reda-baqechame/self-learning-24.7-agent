@@ -176,11 +176,15 @@ SYSTEMS = {
                   "test_procedure_v2.py", "test_capability_signatures.py",
                   "test_git_operators.py", "test_xlsx_operators.py",
                   "test_transactional_contracts.py",
-                  "test_correctness_patch.py", "test_http_operators.py", "test_computeruse.py", "test_computeruse_live.py", "test_computer_session.py"],
+                  "test_correctness_patch.py", "test_http_operators.py", "test_computeruse.py", "test_computeruse_live.py", "test_computer_session.py", "test_computerbench.py"],
         "blind": "promotion and routing decisions are proven against seeded "
                  "outcome ledgers, not against months of real measured "
                  "performance. The design gate checks mechanics and the known "
-                 "fingerprints of generated filler; it cannot judge beauty.",
+                 "fingerprints of generated filler; it cannot judge beauty. "
+                 "ComputerBench repository tests validate only an external-pack "
+                 "contract and known development fixtures: without a separately "
+                 "supplied owner-authenticated pack/results, independent "
+                 "acceptance and release remain false.",
     },
     "6. Control plane & interop": {
         "what": "panel, live events, cards, chief, doctor, preflight, backup, "
@@ -380,9 +384,10 @@ def run_suite(capture_path=None):
     return out, failed
 
 
-FAILED_LINE_RE = re.compile(r"^FAILED: (test_\w+\.py)\b")
-RUNALL_TAIL_RE = re.compile(r"^\d+ executed: \d+ passed, \d+ skipped, "
-                            r"(\d+) failed")
+FAILED_LINE_RE = re.compile(r"^FAILED:\s*(.+?)\s*$")
+FAILED_NAME_RE = re.compile(r"test_\w+\.py")
+RUNALL_TAIL_RE = re.compile(r"^(\d+) executed: (\d+) passed, (\d+) skipped, "
+                            r"(\d+) failed(?:\s|$)")
 
 
 def parse(output):
@@ -403,7 +408,7 @@ def parse(output):
     and only its observations are lost to the interleaving, which the
     report can afford — verdicts cannot."""
     per, current = {}, None
-    named_failed, tail_seen = set(), False
+    named_failed, footer = set(), None
     for line in output.splitlines():
         line = line.strip()
         m = TEST_RE.match(line)
@@ -414,10 +419,18 @@ def parse(output):
             continue
         m = FAILED_LINE_RE.match(line)
         if m:
-            named_failed.add(m.group(1))
+            names = [part.strip() for part in m.group(1).split(",")]
+            if (not names or any(not FAILED_NAME_RE.fullmatch(name)
+                                 for name in names)):
+                raise ValueError("invalid authoritative FAILED file list")
+            named_failed.update(names)
             continue
-        if RUNALL_TAIL_RE.match(line):
-            tail_seen = True
+        m = RUNALL_TAIL_RE.match(line)
+        if m:
+            found = tuple(int(value) for value in m.groups())
+            if footer is not None and footer != found:
+                raise ValueError("conflicting authoritative footer totals")
+            footer = found
             continue
         if current is None:
             continue
@@ -432,7 +445,7 @@ def parse(output):
         if m:
             per[current]["skipped"] = m.group(2).strip() or "no reason given"
             per[current]["passed"] = False
-    if tail_seen:
+    if footer is not None:
         for name, rec in per.items():
             if not rec["passed"] and not rec["skipped"] \
                     and name not in named_failed:
@@ -445,6 +458,16 @@ def parse(output):
             if name in per:
                 per[name]["passed"] = False
                 per[name]["skipped"] = None
+        executed, passed, skipped, failed = footer
+        actual = (len(per),
+                  sum(bool(rec["passed"]) for rec in per.values()),
+                  sum(bool(rec["skipped"]) for rec in per.values()),
+                  sum(not rec["passed"] and not rec["skipped"]
+                      for rec in per.values()))
+        if (len(named_failed) != failed or
+                actual != (executed, passed, skipped, failed)):
+            raise ValueError("generated evidence totals differ from the "
+                             "authoritative footer")
     return per
 
 

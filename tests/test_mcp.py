@@ -209,9 +209,61 @@ def image_publication_swap_race():
           "or fails closed without an outside artifact")
 
 
-def image_existing_target_swap_race():
+def image_posix_directory_fd_anchor():
+    if os.name == "nt":
+        print("[mcp-posix-anchor] NOT-APPLICABLE on Windows: publication uses "
+              "identity revalidation and alias cleanup instead")
+        return
     raw = _literal_png()
-    root = tempfile.mkdtemp(prefix="mcp-target-swap-")
+    root = tempfile.mkdtemp(prefix="mcp-posix-anchor-")
+    artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
+    real_link = os.link
+    observed = []
+
+    def observing_link(source, target, *args, **kwargs):
+        src_fd = kwargs.get("src_dir_fd")
+        dst_fd = kwargs.get("dst_dir_fd")
+        assert isinstance(src_fd, int) and src_fd == dst_fd, \
+            "POSIX publication was not anchored to one directory descriptor"
+        opened = os.fstat(src_fd)
+        expected = os.lstat(artifact_dir)
+        observed.append((opened.st_dev, opened.st_ino))
+        assert observed[-1] == (expected.st_dev, expected.st_ino), \
+            "publication descriptor did not identify the validated directory"
+        return real_link(source, target, *args, **kwargs)
+
+    os.link = observing_link
+    try:
+        saved = mcp._save_blob(
+            root, {"type": "image", "mimeType": "image/png",
+                   "data": base64.b64encode(raw).decode("ascii")}, 0)
+    finally:
+        os.link = real_link
+    assert observed and saved is not None, \
+        "valid POSIX publication did not traverse the directory-fd anchor"
+    print("[mcp-posix-anchor] publication source and target names are both "
+          "resolved relative to the validated open directory descriptor")
+
+
+def _short_name(path):
+    if os.name != "nt":
+        return None
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(1024)
+    if not ctypes.windll.kernel32.GetShortPathNameW(path, buffer, 1024):
+        return None
+    short = buffer.value
+    return short if os.path.normcase(os.path.abspath(short)) != \
+        os.path.normcase(os.path.abspath(path)) else None
+
+
+def _same_physical_path(left, right):
+    return (os.path.normcase(os.path.realpath(left)) ==
+            os.path.normcase(os.path.realpath(right)))
+
+
+def _image_existing_target_swap_race(root, spelling):
+    raw = _literal_png()
     outside = tempfile.mkdtemp(prefix="mcp-target-swap-outside-")
     artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
     os.makedirs(artifact_dir)
@@ -226,9 +278,7 @@ def image_existing_target_swap_race():
     swapped = []
 
     def swapping_open(path, mode="r", *args, **kwargs):
-        if (not swapped and mode == "rb"
-                and os.path.normcase(os.path.abspath(path)) ==
-                    os.path.normcase(os.path.abspath(target))):
+        if not swapped and mode == "rb" and _same_physical_path(path, target):
             os.unlink(target)
             os.link(outside_file, target)
             swapped.append(True)
@@ -245,8 +295,24 @@ def image_existing_target_swap_race():
     assert "content omitted" in rendered and "saved to" not in rendered, \
         "digest target swapped to an outside hard link was accepted"
     assert os.stat(outside_file).st_nlink == 2
-    print("[mcp-race] existing regular target swapped to an outside hard link "
-          "during read fails closed")
+    print(f"[mcp-race] {spelling} existing regular target swapped to an "
+          f"outside hard link during read fails closed")
+
+
+def image_existing_target_swap_race():
+    _image_existing_target_swap_race(
+        tempfile.mkdtemp(prefix="mcp-target-swap-"), "normal-path")
+    if os.name == "nt":
+        parent = tempfile.mkdtemp(prefix="mcp-target-swap-alias-")
+        long_root = os.path.join(parent, "mcpaliasspellingprobe")
+        os.mkdir(long_root)
+        alias = _short_name(long_root)
+        if alias is None:
+            print("[mcp-race] SKIP actual-8.3-path: 8dot3 name creation is disabled")
+        else:
+            assert os.path.realpath(alias) != os.path.abspath(alias), \
+                "8.3 fixture did not produce a real spelling difference"
+            _image_existing_target_swap_race(alias, "actual-8.3-path")
 
 
 def image_existing_parent_redirect_at_open():
@@ -267,9 +333,7 @@ def image_existing_parent_redirect_at_open():
     moved = []
 
     def moving_open(path, mode="r", *args, **kwargs):
-        if (not moved and mode == "rb"
-                and os.path.normcase(os.path.abspath(path)) ==
-                    os.path.normcase(os.path.abspath(target))):
+        if not moved and mode == "rb" and _same_physical_path(path, target):
             os.rename(tmp_dir, moved_tmp)
             moved.append(_redirect_directory(tmp_dir, moved_tmp))
         return real_open(path, mode, *args, **kwargs)
@@ -659,6 +723,7 @@ def main():
     image_existing_target_link()
     image_directory_swap_race()
     image_publication_swap_race()
+    image_posix_directory_fd_anchor()
     image_existing_target_swap_race()
     image_existing_parent_redirect_at_open()
     wav_artifact()
