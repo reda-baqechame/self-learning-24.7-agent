@@ -267,11 +267,8 @@ MUTATIONS = [
      "an unauthenticated upload attempt instead of a refusal"),
 
     ("acquire: install becomes bookkeeping again", "acquire.py",
-     '''    rc, out, err = execution.run("converter", argv, root, timeout=600,
-                                 reason=f"acquire {spec}")
-    ok = (rc == 0)''',
-     '''    rc, out, err = 0, "(install %s)" % spec, ""
-    ok = True''',
+     '''        rc, out, err = sandbox.run(shlex.join(argv), arena, {}, 900, install_cfg)''',
+     '''        rc, out, err = 0, "(install recorded without execution)", ""''',
      "test_acquire.py",
      "an acquisition reaching 'trusted' with nothing installed"),
 
