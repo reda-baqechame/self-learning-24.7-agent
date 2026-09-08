@@ -205,7 +205,7 @@ patches — it is **five gateways every caller must pass through**:
 **These are enforced, not documented.** `python execution.py --audit` scans
 every module in the tree for a raw `subprocess` call outside the authority
 and reports violations; `tests/test_invariants.py` fails the suite if there
-are any. Today: **0 violations across 77 modules**, with 16 modules declared
+are any. Today: **0 violations across 118 modules**, with 18 modules declared
 platform-internal, each carrying a written reason.
 
 ### 3.6 The Memory Institution — what outlives every model
@@ -681,7 +681,7 @@ walks the tree:
 
 | Check | Enumerates |
 |---|---|
-| execution paths | every subprocess call site in 77 modules |
+| execution paths | every subprocess call site in 118 modules |
 | execution catalogue | every declared operation against what it declares |
 | filesystem zones | every declared control file and directory |
 | traversal spellings | 12 escape forms |
