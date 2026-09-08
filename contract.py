@@ -137,14 +137,28 @@ def validate_acceptance(accept):
         return []
     if not isinstance(accept, (list, tuple)):
         raise ContractError("acceptance must be a list")
-    out = list(accept)
-    if len(out) > MAX_ACCEPT:
+    if len(accept) > MAX_ACCEPT:
         raise ContractError(
-            f"{len(out)} acceptance tests; more than {MAX_ACCEPT} means "
+            f"{len(accept)} acceptance tests; more than {MAX_ACCEPT} means "
             f"this is several goals wearing one id — split it")
-    for a in out:
-        if not isinstance(a, dict) or not a.get("check"):
+    out, ids = [], set()
+    for i, a in enumerate(accept, 1):
+        if not isinstance(a, dict):
             raise ContractError(f"malformed acceptance entry: {a!r}")
+        aid, what, check = a.get("id"), a.get("what"), a.get("check")
+        if not isinstance(aid, str) or not aid.strip():
+            raise ContractError(f"acceptance {i} needs a non-empty string id")
+        if aid in ids:
+            raise ContractError(f"duplicate acceptance id: {aid!r}")
+        if not isinstance(what, str) or not what.strip():
+            raise ContractError(f"acceptance {aid} needs a stated criterion")
+        if not isinstance(check, str) or not check.strip():
+            raise ContractError(f"acceptance {aid} needs a command string")
+        if "group" in a and (not isinstance(a["group"], str)
+                             or not a["group"].strip()):
+            raise ContractError(f"acceptance {aid} has an invalid group")
+        ids.add(aid)
+        out.append(dict(a))
     return out
 
 

@@ -174,6 +174,33 @@ def check_goal_limits_are_finite_before_work():
           "no-extra-cap meaning")
 
 
+def check_contract_acceptance_is_complete_before_work():
+    malformed = (
+        [{"id": "A1", "what": "artifact exists", "check": True}],
+        [{"id": "A1", "what": "artifact exists", "check": "   "}],
+        [{"id": "", "what": "artifact exists", "check": "exit 0"}],
+        [{"id": "A1", "what": "", "check": "exit 0"}],
+        [{"id": "A1", "what": "one", "check": "exit 0"},
+         {"id": "A1", "what": "two", "check": "exit 0"}],
+        [{"id": "A1", "what": "artifact exists", "check": "exit 0",
+          "group": False}],
+    )
+    for accept in malformed:
+        with tempfile.TemporaryDirectory(prefix="goal-accept-") as root:
+            try:
+                contract.create(root, "g-bad", "goal", accept=accept)
+            except contract.ContractError:
+                pass
+            else:
+                raise AssertionError(
+                    f"malformed contract acceptance was accepted: {accept!r}")
+            assert not os.path.exists(os.path.join(root, "goals")), (
+                "malformed acceptance wrote goal state before refusing")
+    print("[goal-contract] direct callers must provide unique string ids, "
+          "stated criteria, command strings and valid optional groups before "
+          "any goal state is written")
+
+
 def check_mission_work_is_bound_before_queueing():
     with tempfile.TemporaryDirectory(prefix="mission-work-") as root:
         with io.open(os.path.join(root, "settings.toml"), "w",
@@ -356,6 +383,7 @@ def main():
     check_doctor_reports_import_failures()
     check_panel_names_a_gate()
     check_goal_limits_are_finite_before_work()
+    check_contract_acceptance_is_complete_before_work()
     check_mission_work_is_bound_before_queueing()
     check_panel_language_and_routes_are_truthful()
     check_invite_posts_no_actor()

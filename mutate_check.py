@@ -50,6 +50,11 @@ MUTATIONS = [
      '    if False:',
      "test_ledger_defects.py", "invalid goal limit was accepted"),
 
+    ("goal contract: non-string grader accepted", "contract.py",
+     '        if not isinstance(check, str) or not check.strip():',
+     '        if False:',
+     "test_ledger_defects.py", "malformed contract acceptance was accepted"),
+
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',
