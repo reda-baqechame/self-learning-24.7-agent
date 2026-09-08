@@ -795,9 +795,12 @@ def start_goal(home, slug, root, goal_text, gid=None, cycles=4, criteria=None,
             cycles, "cycles", whole=True, positive=True)
     except contractmod.ContractError as e:
         raise ValueError(str(e)) from None
-    gid = gid or time.strftime("g-%Y%m%d-%H%M%S")
-    if not re.fullmatch(r"[\w.-]{1,64}", gid):
-        raise ValueError("invalid goal id")
+    gid = time.strftime("g-%Y%m%d-%H%M%S") if gid is None else gid
+    try:
+        goal_text = contractmod.validate_goal_text(goal_text)
+        gid = contractmod.validate_goal_id(gid)
+    except contractmod.ContractError as e:
+        raise ValueError(str(e)) from None
     cmd = [sys.executable, os.path.join(HOME, "goal.py"), "pursue",
            goal_text, "--expert", slug, "--home", home,
            "--id", gid, "--drive", "--cycles", str(cycles)]
@@ -2409,6 +2412,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not topic:
                     self._fail({"error": "a learner needs a topic"}, 400)
                     return
+                # A learner is an expert plus a goal pursuit. Validate its
+                # launch ceiling before fleet.create writes the expert.
+                learner_cycles = _goal_request({
+                    "cycles": d["cycles"] if "cycles" in d else 6
+                })["cycles"]
                 dest = fleet.create(self.home, d["name"],
                                     d.get("identity") or f"learning {topic} to mastery")
                 slug = os.path.basename(dest)
@@ -2422,7 +2430,7 @@ class Handler(BaseHTTPRequestHandler):
                     goal_text += " Sources to ingest first: " + ", ".join(
                         d["sources"])[:800]
                 gid = start_goal(self.home, slug, dest, goal_text,
-                                 cycles=d.get("cycles") or 6)
+                                 cycles=learner_cycles)
                 self._json({"created": slug, "pursuing": gid})
             elif path == "/api/missions":
                 # UI spec §6: a mission is created with its success criteria,

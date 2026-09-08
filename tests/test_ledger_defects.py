@@ -37,6 +37,7 @@ import doctor                   # noqa: E402
 import contract                 # noqa: E402
 import federation               # noqa: E402
 import fileauth                 # noqa: E402
+import goal                     # noqa: E402
 import harness                  # noqa: E402
 import mission                  # noqa: E402
 import modelgateway             # noqa: E402
@@ -184,6 +185,8 @@ def check_contract_acceptance_is_complete_before_work():
          {"id": "A1", "what": "two", "check": "exit 0"}],
         [{"id": "A1", "what": "artifact exists", "check": "exit 0",
           "group": False}],
+        [{"id": "A1", "what": "artifact exists", "check": "exit 0",
+          "group": "../escape"}],
     )
     for accept in malformed:
         with tempfile.TemporaryDirectory(prefix="goal-accept-") as root:
@@ -199,6 +202,54 @@ def check_contract_acceptance_is_complete_before_work():
     print("[goal-contract] direct callers must provide unique string ids, "
           "stated criteria, command strings and valid optional groups before "
           "any goal state is written")
+
+
+def check_goal_identity_is_valid_before_artifacts():
+    malformed = (
+        {"gid": "../escape", "goal": "valid"},
+        {"gid": "..", "goal": "valid"},
+        {"gid": ".", "goal": "valid"},
+        {"gid": "g-valid", "goal": "   "},
+    )
+    for values in malformed:
+        with tempfile.TemporaryDirectory(prefix="goal-identity-") as root:
+            try:
+                contract.create(root, values["gid"], values["goal"])
+            except contract.ContractError:
+                pass
+            else:
+                raise AssertionError(
+                    f"malformed goal identity was accepted: {values!r}")
+            assert not os.path.exists(os.path.join(root, "goals")), (
+                "malformed goal identity wrote state before refusing")
+
+    # goal.pursue historically made goal.md and toolbox.md before contract
+    # validation. A sentinel proves an invalid launch never enters _goal_dir.
+    with tempfile.TemporaryDirectory(prefix="goal-pursue-") as home:
+        os.makedirs(os.path.join(home, "experts", "probe"))
+        original = goal._goal_dir
+        goal._goal_dir = lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("invalid pursuit reached artifact creation"))
+        try:
+            for values in (("", "g-valid", 4, "probe"),
+                           ("valid", "../escape", 4, "probe"),
+                           ("valid", "..", 4, "probe"),
+                           ("valid", "", 4, "probe"),
+                           ("valid", "g-valid", 0, "probe"),
+                           ("valid", "g-valid", 4, "..")):
+                try:
+                    goal.pursue(home, values[3], values[0], gid=values[1],
+                                cycles=values[2])
+                except contract.ContractError:
+                    pass
+                else:
+                    raise AssertionError(
+                        f"invalid pursuit reached work: {values!r}")
+        finally:
+            goal._goal_dir = original
+    print("[goal-identity] contract ids, expert slugs and objectives are "
+          "path-safe and non-empty; direct pursuits validate identity and "
+          "limits before their first artifact")
 
 
 def check_mission_work_is_bound_before_queueing():
@@ -384,6 +435,7 @@ def main():
     check_panel_names_a_gate()
     check_goal_limits_are_finite_before_work()
     check_contract_acceptance_is_complete_before_work()
+    check_goal_identity_is_valid_before_artifacts()
     check_mission_work_is_bound_before_queueing()
     check_panel_language_and_routes_are_truthful()
     check_invite_posts_no_actor()

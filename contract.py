@@ -78,6 +78,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -106,6 +107,23 @@ MAX_ACCEPT = 12          # a goal needing more checks than this is several goals
 
 class ContractError(Exception):
     pass
+
+
+def validate_goal_id(value):
+    """Return one path-safe contract id, or refuse before touching disk."""
+    if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):
+        raise ContractError(
+            "goal id must start with an ASCII letter or number and contain "
+            "only letters, numbers, '.', '_' or '-' (64 characters maximum)")
+    return value
+
+
+def validate_goal_text(value):
+    """Return a non-empty owner goal without accepting typed lookalikes."""
+    if not isinstance(value, str) or not value.strip():
+        raise ContractError("goal must be a non-empty string")
+    return value.strip()
 
 
 def validate_budget_limit(value, name, *, whole=False, positive=False):
@@ -154,9 +172,11 @@ def validate_acceptance(accept):
             raise ContractError(f"acceptance {aid} needs a stated criterion")
         if not isinstance(check, str) or not check.strip():
             raise ContractError(f"acceptance {aid} needs a command string")
-        if "group" in a and (not isinstance(a["group"], str)
-                             or not a["group"].strip()):
-            raise ContractError(f"acceptance {aid} has an invalid group")
+        if "group" in a:
+            group = a["group"]
+            if not isinstance(group, str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", group):
+                raise ContractError(f"acceptance {aid} has an invalid group")
         ids.add(aid)
         out.append(dict(a))
     return out
@@ -165,7 +185,7 @@ def validate_acceptance(accept):
 # ------------------------------------------------------------------- paths
 
 def _dir(root, gid):
-    return os.path.join(root, "goals", str(gid))
+    return os.path.join(root, "goals", validate_goal_id(gid))
 
 
 def path(root, gid):
@@ -312,17 +332,19 @@ def parse_accept(items):
 
 
 def create(root, gid, goal, criteria="", accept=None, non_goals="",
-           max_usd=0.0, max_minutes=0, max_cycles=4):
+            max_usd=0.0, max_minutes=0, max_cycles=4):
     """Write the contract, in `draft`. Freezing is a separate, explicit act
     so a caller can review what is about to become the definition of done."""
+    gid = validate_goal_id(gid)
+    goal = validate_goal_text(goal)
     accept = validate_acceptance(accept)
     max_usd = validate_budget_limit(max_usd, "max_usd")
     max_minutes = validate_budget_limit(max_minutes, "max_minutes", whole=True)
     max_cycles = validate_budget_limit(max_cycles, "max_cycles", whole=True,
                                        positive=True)
     c = {
-        "gid": str(gid), "version": 1,
-        "goal": str(goal), "criteria": str(criteria or ""),
+        "gid": gid, "version": 1,
+        "goal": goal, "criteria": str(criteria or ""),
         "non_goals": str(non_goals or ""),
         "acceptance": accept,
         "budget": {"max_usd": max_usd,
@@ -333,7 +355,7 @@ def create(root, gid, goal, criteria="", accept=None, non_goals="",
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     _write(root, gid, c)
-    event(root, gid, "contract_created", goal=str(goal)[:200],
+    event(root, gid, "contract_created", goal=goal[:200],
           acceptance=len(accept), max_usd=c["budget"]["max_usd"],
           max_minutes=c["budget"]["max_minutes"], max_cycles=max_cycles)
     return c

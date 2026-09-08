@@ -62,6 +62,21 @@ def main():
         assert len(experts) == 1 and experts[0]["identity"] == "neural nets"
         print("[create] one click -> expert with its own identity and memory")
 
+        # Learner creation includes a goal launch. Invalid cycles must fail
+        # before either half writes state; false/zero used to become six.
+        try:
+            api("POST", "/api/learner", {
+                "name": "Invalid Learner", "topic": "nothing",
+                "cycles": False})
+            raise AssertionError("invalid learner cycles must be refused")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+        assert not os.path.exists(os.path.join(
+            home, "experts", "invalid-learner")), (
+            "invalid learner launch created an expert before refusing")
+        print("[learner-input] invalid cycles refuse before expert or goal "
+              "state is created")
+
         # teach it a link, over the real scheme ingestion accepts
         page = os.path.join(home, "p.html")
         with open(page, "w", encoding="utf-8") as f:

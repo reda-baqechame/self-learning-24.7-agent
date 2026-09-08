@@ -55,6 +55,46 @@ MUTATIONS = [
      '        if False:',
      "test_ledger_defects.py", "malformed contract acceptance was accepted"),
 
+    ("goal contract: traversal id accepted", "contract.py",
+     '''    if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):''',
+     '''    if False:''',
+     "test_ledger_defects.py", "malformed goal identity was accepted"),
+
+    ("goal contract: unsafe swarm group accepted", "contract.py",
+     '''            if not isinstance(group, str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", group):''',
+     '''            if False:''',
+     "test_ledger_defects.py", "malformed contract acceptance was accepted"),
+
+    ("goal contract: empty objective accepted", "contract.py",
+     '    goal = validate_goal_text(goal)',
+     '    goal = str(goal)',
+     "test_ledger_defects.py", "malformed goal identity was accepted"),
+
+    ("goal pursuit: artifacts precede validation", "goal.py",
+     '    goal = contractmod.validate_goal_text(goal)',
+     '    goal = str(goal)',
+     "test_ledger_defects.py", "invalid pursuit reached artifact creation"),
+
+    ("goal pursuit: empty explicit id becomes default", "goal.py",
+     '''        time.strftime("g-%Y%m%d-%H%M%S") if gid is None else gid)''',
+     '''        gid or time.strftime("g-%Y%m%d-%H%M%S"))''',
+     "test_ledger_defects.py", "invalid pursuit reached artifact creation"),
+
+    ("goal pursuit: expert path escapes the fleet", "goal.py",
+     '''    if not isinstance(expert, str) or not re.fullmatch(
+            r"[a-z0-9-]{1,64}", expert):''',
+     '''    if False:''',
+     "test_ledger_defects.py", "invalid pursuit reached artifact creation"),
+
+    ("learner: invalid cycles silently default", "ui.py",
+     '''                learner_cycles = _goal_request({
+                    "cycles": d["cycles"] if "cycles" in d else 6
+                })["cycles"]''',
+     '''                learner_cycles = d.get("cycles") or 6''',
+     "test_ui.py", "invalid learner launch created an expert before refusing"),
+
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',
