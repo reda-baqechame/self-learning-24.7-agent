@@ -58,3 +58,45 @@ declared OS/Python matrix, mutations, real local-browser tests and separately
 authorized live-provider tests. Report verified completion, false success,
 unauthorized effects, abstention, recovery, duplicates, intervention, cost and
 latency. No aggregate score or compatible API establishes industry leadership.
+
+## Task 5 implementation decisions
+
+The runtime reloads the full owner MCP specification at every operation and
+requires `computer_policy={revision,allowed_origin}`. `ComputerSession` keeps one
+server and sealed receipt authority per task. The server lease uses a persistent
+OS advisory lock, never age-based deletion. Acknowledged clicks stay DISPATCHED;
+finalization terminalizes pending dispatches as UNKNOWN. Exact fresh navigation
+URL readback verifies only `navigation_url`, never business effects. Owner-only
+reconciliation appends `confirmed_effect`, `confirmed_no_effect` or
+`authorize_retry` with explicit scope and validated evidence bytes. UNKNOWN
+history and workflow_verified=false remain intact.
+
+The sealed task observation separately binds the host Playwright viewport and
+page-reported device scale with explicit provenance. Missing measurements are
+null/unavailable; page scale is untrusted and cannot expand authority. The host
+rechecks viewport at click preflight. This increment authorizes CSS-locator
+actions only, never screenshot-coordinate input. Legacy BrowserAuthority keeps
+its existing exact state schema. Runtime finalization attempts every owned
+session and aggregates failures; failed environments retain taint and exclusion.
+
+`computerprocess.py` supervises the task's reviewed executable. Windows assigns
+the supervisor to a non-inherited kill-on-close Job before spawning descendants;
+host cleanup terminates that unique job and checks active process count. POSIX
+uses a separate child process group and a CONTROL stop request to the living
+supervisor, avoiding signals to recovered stale PIDs. Owner EOF is detected by a
+separate bounded receiver even when the child stops reading stdin. POSIX children
+that deliberately detach are unsupported; process groups are not a sandbox.
+Docker owns a generated name/cidfile and requires exact-ID removal plus daemon
+readback. Cleanup uncertainty retains taint and exclusion. This is local fixture
+evidence, not a cross-platform release claim.
+
+The Docker CID reader resolves its CONTROL parent via File Authority, refuses
+links/hardlinks and accepts only a generated filename with one 64-hex identifier.
+It exists because the generic secret-content heuristic classifies Docker IDs as
+keys; it does not expose arbitrary contents or credentials to a model. Session
+and debug state are excluded from distributable archives even when root is `.`.
+
+Limits retained: the top-level allowed origin is not network containment; the
+observer/action vocabulary is bounded to the invoice-link family. Image metadata
+is retained and revalidated, but provider-specific image budget/accounting and
+model image transport remain outside this increment.

@@ -44,6 +44,12 @@ _HOST_OBSERVE = """async page => {
   if(handles.length>1000){await Promise.all(handles.map(h=>h.dispose()));throw Error('too many targets');}
   host.handles=handles;
   const state=await page.evaluate(observe);
+  let viewport=null,scale=null;
+  try {viewport=page.viewportSize();} catch(e){}
+  try {scale=await page.evaluate(()=>window.devicePixelRatio);} catch(e){}
+  state.view_context={viewport,viewport_source:viewport?'playwright_host':'unavailable',
+    device_scale:Number.isFinite(scale)&&scale>0?scale:null,
+    device_scale_source:Number.isFinite(scale)&&scale>0?'page_untrusted':'unavailable'};
   if(generation!==host.document || host.main!==page.mainFrame())throw Error('document changed during observation');
   state.binding={tab:host.tab,frame:host.frame,document:host.document};
   return state;
@@ -65,6 +71,11 @@ _HOST_CLICK = """async page => {
     if(Date.now()>=deadline)return 'deadline';
     if(!bindingOK())return 'tab/frame/document changed';
     if(page.url()!==p.page_url)return 'page changed';
+    if(p.view_context){
+      const current=page.viewportSize(),expected=p.view_context.viewport;
+      if((current===null)!==(expected===null)||current&&
+        (current.width!==expected.width||current.height!==expected.height))return 'viewport changed';
+    }
     if(await locator.count()!==1)return 'target absent or ambiguous';
     if(!await locator.evaluate((a,old)=>a===old,original))return 'element replaced';
     return await locator.evaluate((a,p)=>{
@@ -150,7 +161,7 @@ def _locator_opt_in(spec):
         raise Refused("owner must review and pin the host locator tool")
 
 
-def playwright_observe(server, root, trace=None):
+def playwright_observe(server, root, trace=None, task_context=None, artifacts=None):
     """Fixed read-only observation for the bounded invoice adapter."""
     import mcp
     spec = getattr(server, "spec", {}) or {}
@@ -164,8 +175,11 @@ def playwright_observe(server, root, trace=None):
     started = time.monotonic()
     code = _HOST_OBSERVE % (PLAYWRIGHT_OBSERVE, json.dumps(secrets.token_hex(16)),
                             json.dumps(secrets.token_hex(16)))
+    attribution = {"task_context": task_context} if task_context is not None else {}
     result, how = mcp.computer_guarded_call(server, "browser_run_code_unsafe",
-        {"code": code}, root=root, fresh=True)
+        {"code": code}, root=root, fresh=True, **attribution)
+    if artifacts is not None:
+        mcp.render_result(result, root=root, artifacts=artifacts)
     if trace is not None:
         trace.append({"tool":"browser_run_code_unsafe", "how":how,
                       "error":bool((result or {}).get("isError")),
@@ -176,10 +190,13 @@ def playwright_observe(server, root, trace=None):
     parsed = _playwright_json(result)
     if trace is not None:
         trace[-1]["observation"] = parsed
+    if task_context is None:
+        parsed.pop('view_context',None)  # Legacy BrowserAuthority keeps its exact state schema.
     return parsed
 
 
-def playwright_atomic_click(server, root, preconditions, trace=None):
+def playwright_atomic_click(server, root, preconditions, trace=None,
+                            task_context=None, before_send=None, artifacts=None):
     """Bounded locator click; legacy name does not imply atomic check-and-act.
 
     The owner must opt this adapter into the MCP server's trusted identity.
@@ -208,8 +225,11 @@ def playwright_atomic_click(server, root, preconditions, trace=None):
     deadline_epoch = int(time.time() * 1000 + remaining * 1000)
     code = _HOST_CLICK % (json.dumps(p, separators=(",", ":"), allow_nan=False), deadline_epoch)
     started = time.monotonic()
+    attribution = {"task_context": task_context} if task_context is not None else {}
+    if before_send is not None:
+        attribution["before_send"] = before_send
     result, how = mcp.computer_guarded_call(server, "browser_run_code_unsafe",
-                                            {"code": code}, root=root, fresh=True)
+                                            {"code": code}, root=root, fresh=True, **attribution)
     if trace is not None:
         trace.append({"tool": "browser_run_code_unsafe", "how": how,
                       "error": bool((result or {}).get("isError")),
@@ -227,7 +247,8 @@ def playwright_atomic_click(server, root, preconditions, trace=None):
     if parsed.get("status") != "ACTION_DISPATCHED" or parsed.get("clicked") is not True:
         raise Unresolved("browser dispatch acknowledgment missing")
     try:
-        parsed["post_observation"] = playwright_observe(server, root, trace)
+        parsed["post_observation"] = (playwright_observe(server, root, trace, task_context=task_context,artifacts=artifacts)
+                                      if task_context is not None else playwright_observe(server, root, trace))
     except Exception as error:
         raise Unresolved("click dispatched but post-observation failed; do not retry") from error
     return parsed

@@ -1,0 +1,419 @@
+"""Task-owned lifecycle and durable intent tests using a real stdio child."""
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import threading
+import unittest
+import zipfile
+from unittest.mock import patch
+
+HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE))
+import mcp
+import computeruse as C
+
+def wait_file(path):
+    deadline = time.monotonic()+10
+    while time.monotonic()<deadline:
+        if path.exists():
+            return
+        time.sleep(.02)
+    raise AssertionError('owned fixture did not reach boundary: '+str(path))
+
+class Sessions(unittest.TestCase):
+    def setUp(self):
+        self.assertIsNotNone(importlib.util.find_spec('computersession'),
+                             'task-owned ComputerSession module is absent')
+        import computersession
+        self.CS = computersession
+        self.temp = tempfile.TemporaryDirectory(prefix='cs-', dir=os.getenv('AGENT_TEST_TMP'))
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.task = {'id':'task-one','lineage':'lineage-one','role':'worker','status':'running'}
+        self.spec = {'cmd':sys.executable,'args':[str(Path(__file__).with_name('computer_session_fixture.py')),str(self.root)],
+                     'atomic_browser_adapter':True,'computer_locator_tool':'browser_run_code_unsafe',
+                     'approval':'none','allow_roles':['worker'],
+                     'computer_policy':{'revision':'r1','allowed_origin':'https://example.com'}}
+        self.spec['trust_identity'] = mcp.server_identity(self.spec)
+        self.config()
+    def config(self):
+        (self.root/'mcp.json').write_text(json.dumps({'servers':{'fixture':self.spec}}))
+    def session(self, task=None):
+        s = self.CS.ComputerSession(str(self.root), task or self.task, 'fixture','r1')
+        self.addCleanup(s.close,'test cleanup')
+        return s
+    def test_reuse_pause_lease_restart_epoch_and_cleanup(self):
+        s = self.session(); opened = s.open('https://example.com/')
+        proc = s.server.proc
+        first = opened['observation']; epoch = s.epoch
+        self.task['status'] = 'blocked'
+        with self.assertRaises(C.Refused):
+            self.session(dict(self.task,id='other'))
+        self.task.update(status='running',provider='model-failover')
+        second = s.observe()
+        self.assertEqual(first['state']['binding']['tab'],second['state']['binding']['tab'])
+        self.assertIs(s.server.proc,proc)
+        s.close('completed'); self.assertIsNotNone(proc.poll())
+        restarted = self.session(); restarted.open('https://example.com/')
+        self.assertNotEqual(epoch,restarted.epoch)
+        with self.assertRaises(C.Refused):
+            restarted.click(first,'one')
+        print('[session-lifecycle] real process and tab reused through pause and model failover; exclusive lease, new epoch and child cleanup')
+    def test_ack_is_pending_not_verified_and_same_intent_is_blocked(self):
+        s = self.session(); receipt = s.open('https://example.com/')['observation']
+        result = s.click(receipt,'one')
+        self.assertEqual(result['status'],'ACTION_DISPATCHED')
+        self.assertFalse(result['workflow_verified'])
+        self.assertEqual(s.actions()[-1]['state'],'DISPATCHED')
+        with self.assertRaises(C.Refused):
+            s.click(s.observe(),'one')
+        s.click(s.observe(),'two')
+        s.close('completed')
+        clicks = [a for a in s.actions() if a['operation']=='click']
+        self.assertEqual([a['state'] for a in clicks],['UNKNOWN','UNKNOWN'])
+        self.assertTrue(all(a['dispatch_acknowledged'] for a in clicks))
+        print('[pending-effects] acknowledgment permits another intent, never verifies or repeats the same unresolved business action')
+    def test_unknown_blocks_retry_lineage_even_with_new_observation(self):
+        s = self.session(); receipt = s.open('https://example.com/')['observation']
+        (self.root/'hold-response').touch(); s.server.timeout=.15
+        with self.assertRaises(C.Unresolved):
+            s.click(receipt,'one')
+        self.assertEqual(s.state,'tainted')
+        s.close('failure')
+        retry = self.session(dict(self.task,id='retry',provider='fallback'))
+        with self.assertRaises(C.Refused):
+            retry.open('https://example.com/')
+        self.assertEqual((self.root/'effect-seen').read_text(),'one')
+        print('[unknown-lineage] lost response taints and survives retry task identity and model failover')
+    def test_role_origin_revocation_and_explicit_effect_attribution(self):
+        with self.assertRaises(C.Refused):
+            self.session(dict(self.task,role='reader'))
+        s = self.session()
+        with self.assertRaises(C.Refused):
+            s.open('https://outside.example/')
+        with patch.dict(os.environ,{'AGENT_TASK_ID':'wrong','AGENT_TASK_LINEAGE':'wrong'}):
+            s.open('https://example.com/')
+        rows = [json.loads(x) for x in (self.root/'logs/effects.jsonl').read_text().splitlines()]
+        self.assertTrue(rows)
+        self.assertTrue(all(r['task']=='task-one' and r['key'].startswith('lineage-one|') for r in rows))
+        self.spec['deny_tools']=['browser_run_code_unsafe']; self.config()
+        with self.assertRaises(C.Refused): s.observe()
+        self.assertIsNotNone(s.server.proc.poll())
+        print('[session-policy] role and origin refuse; live owner revocation closes; effects use explicit task identity')
+
+    def agent(self):
+        import loop
+        (self.root/'settings.toml').write_text('[agent]\n[roles.worker]\ntools=["computer_open","computer_observe","computer_click"]\n[roles.reader]\ntools=["read_file"]\n')
+        agent = loop.Agent(str(self.root))
+        for handler in list(agent.log.handlers):
+            self.addCleanup(handler.close)
+            self.addCleanup(agent.log.removeHandler,handler)
+        self.addCleanup(agent.close_computers, 'test cleanup')
+        return agent
+
+    def test_agent_public_tools_role_reuse_and_terminal_cleanup(self):
+        agent = self.agent()
+        args = {'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'}
+        denied = agent.exec_tool(dict(self.task,role='reader'),'computer_open',args)
+        self.assertTrue(denied.startswith('ERROR:'), denied)
+        opened = json.loads(agent.exec_tool(self.task,'computer_open',args))
+        proc = agent._computer_sessions[self.task['id']].server.proc
+        self.task['status']='blocked'; agent.commit_task(self.task)
+        self.assertIsNone(proc.poll())
+        self.task['status']='running'
+        self.assertIn('observation',opened)
+        for _ in range(2):
+            self.assertIn('state',json.loads(agent.exec_tool(self.task,'computer_observe',{})))
+            self.assertIs(agent._computer_sessions[self.task['id']].server.proc,proc)
+        raw=agent.exec_tool(self.task,'browser_evaluate',{'function':'()=>1'})
+        self.assertNotIn('VERIFIED',raw)
+        self.task['status']='done'; agent.commit_task(self.task)
+        self.assertIsNotNone(proc.poll())
+        self.assertFalse(agent._computer_sessions)
+        print('[agent-tools] direct role denial, typed observations, one process across turns, blocked lease retained, completion closes')
+
+    def test_agent_external_cancel_and_process_finally_cleanup(self):
+        for terminal in ('cancelled','failed'):
+            agent=self.agent()
+            self.task['status']='running'
+            (self.root/'state.json').unlink(missing_ok=True)
+            agent.exec_tool(self.task,'computer_open',{'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'})
+            proc=agent._computer_sessions[self.task['id']].server.proc
+            (self.root/'state.json').write_text(json.dumps({'tasks':[dict(self.task,status=terminal)]}))
+            result=agent.exec_tool(self.task,'computer_observe',{})
+            self.assertTrue(result.startswith('ERROR:'),result)
+            self.assertIsNotNone(proc.poll())
+            agent.close_computers('test')
+        (self.root/'state.json').unlink()
+        agent=self.agent()
+        agent.exec_tool(self.task,'computer_open',{'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'})
+        proc=agent._computer_sessions[self.task['id']].server.proc
+        with patch.object(agent,'_run',side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt): agent.run()
+        self.assertIsNotNone(proc.poll())
+        print('[agent-finally] external cancellation/failure refuses next action and closes; interrupted runtime finally closes child')
+
+    def test_owner_reconciliation_evidence_and_worker_denial(self):
+        s=self.session(); receipt=s.open('https://example.com/')['observation']
+        action_id=s.click(receipt,'one')['action_id']; s.close('pending')
+        original=s.actions()[-1].copy()
+        evidence_path=self.root/'effects'/'owner-evidence.txt'
+        evidence_path.write_bytes(b'owner inspected external receipt')
+        meta={'path':'effects/owner-evidence.txt','sha256':hashlib.sha256(evidence_path.read_bytes()).hexdigest(),'bytes':len(evidence_path.read_bytes())}
+        for var in ('AGENT_TASK_ID','AGENT_ROLE'):
+            with patch.dict(os.environ,{var:'worker'}):
+                with self.assertRaises(SystemExit): s.reconcile(action_id,'authorize_retry','invoice_review',meta)
+        (self.root/'worker.txt').write_bytes(evidence_path.read_bytes())
+        with self.assertRaises(C.Refused): s.reconcile(action_id,'authorize_retry','invoice_review',dict(meta,path='worker.txt'))
+        with self.assertRaises(C.Refused): s.reconcile(action_id,'confirmed_effect','invoice_review',dict(meta,sha256='0'*64))
+        s.reconcile(action_id,'authorize_retry','invoice_review',meta)
+        resolved=s.actions()[-1]
+        for key,value in original.items(): self.assertEqual(resolved[key],value)
+        self.assertEqual(resolved['reconciliations'][-1]['verifier_kind'],'owner_attestation')
+        self.assertFalse(resolved['workflow_verified'])
+        restarted=self.session(); restarted.open('https://example.com/')
+        restarted.click(restarted.observe(),'one')
+        print('[owner-intervention] worker entry and worker-only evidence denied; physical digest checked; UNKNOWN history retained with owner attestation')
+
+    def test_persistent_lease_health_never_recommends_deletion(self):
+        import harness, locks
+        s=self.session()
+        lease=next((self.root/'effects'/'computer').glob('*.lock'))
+        old=time.time()-1000
+        os.utime(lease,(old,old))
+        legacy=self.root/'legacy.lock'; legacy.write_text('dead'); os.utime(legacy,(old,old))
+        provider=str(self.root/'settings.toml.update')
+        with locks.advisory_holding(provider):
+            os.utime(provider+'.lock',(old,old))
+            problems=harness.integrity(str(self.root))['problems']
+            self.assertFalse(any('stale lock:' in p and ('effects/computer' in p or 'settings.toml.update' in p) for p in problems),problems)
+            self.assertTrue(any('stale lock: legacy.lock' in p for p in problems),problems)
+            with self.assertRaises(C.Refused): self.session(dict(self.task,id='other'))
+        self.assertTrue(lease.exists())
+        print('[persistent-lock-health] old advisory locks never called safe-to-delete; legacy stale diagnosis and live exclusion remain')
+
+    def test_package_excludes_root_session_private_state(self):
+        import package
+        (self.root/'effects'/'computer').mkdir(parents=True)
+        (self.root/'effects'/'computer'/'ledger.json').write_text('private task URL')
+        (self.root/'.superpowers').mkdir()
+        (self.root/'.superpowers'/'report.md').write_text('private debug evidence')
+        (self.root/'computersession.py').write_text('public module')
+        target=self.root/'result.zip'
+        with patch.object(package,'HERE',str(self.root)), patch.object(sys,'argv',['package.py','--out',str(target)]): package.main()
+        with zipfile.ZipFile(target) as z:
+            self.assertIn('computersession.py',z.namelist())
+            self.assertNotIn('effects/computer/ledger.json',z.namelist())
+            self.assertNotIn('.superpowers/report.md',z.namelist())
+        print('[session-package] root runtime ledger and debug evidence excluded from real archive; module ships')
+
+    def test_owned_grandchild_stops_when_session_closes_or_owner_dies(self):
+        for mode in ('close','crash','blocked'):
+            (self.root/'spawn-grandchild').touch()
+            marker=self.root/'grandchild-ticks'
+            marker.unlink(missing_ok=True)
+            (self.root/'ready').unlink(missing_ok=True)
+            if mode=='close':
+                s=self.session(); s.open('https://example.com/')
+                wait_file(marker); s.close('complete')
+            else:
+                proc=subprocess.Popen([sys.executable,str(Path(__file__)),'--owner',str(self.root),'blocked' if mode=='blocked' else 'prepared'],cwd=HERE)
+                try:
+                    wait_file(self.root/'ready'); wait_file(marker)
+                    if mode=='blocked': time.sleep(.3)
+                    proc.kill(); proc.wait(timeout=5)
+                finally:
+                    if proc.poll() is None: proc.kill(); proc.wait(timeout=5)
+            time.sleep(.6)
+            size=marker.stat().st_size
+            time.sleep(.3)
+            self.assertEqual(marker.stat().st_size,size,'owned grandchild retained execution after close/death')
+        print('[owned-process-tree] real grandchild loses execution on close and abrupt owner death, including a child that stopped reading stdin')
+
+    def test_pinned_docker_session_and_container_cleanup(self):
+        if os.getenv('AGENT_COMPUTER_LIVE')!='1':
+            print('[owned-chromium] NOT_RUN: set AGENT_COMPUTER_LIVE=1 for network-none pinned Docker fixture')
+            return
+        from test_computeruse_live import DOCKER, IMAGE, ORIGIN
+        import org
+        org.create(str(self.root),'Session fixture','owner@example.invalid')
+        org.set_policy(str(self.root),'owner@example.invalid','agents_may_reach_internal_network',True)
+        self.spec.update(cmd=DOCKER,args=['run','-i','--rm','--init','--pull=never',
+            '--network=none','--read-only','--tmpfs=/tmp:rw,nosuid,nodev,size=256m',
+            '--tmpfs=/home/node:rw,nosuid,nodev,size=64m,uid=1000,gid=1000',
+            '--memory=1g','--pids-limit=256','--cap-drop=ALL','--security-opt=no-new-privileges',
+            '--mount',f'type=bind,source={Path(__file__).parent/"computer-click-fixture"},target=/fixture,readonly',
+            '--entrypoint=sh',IMAGE,'-c','node /fixture/server.cjs & exec node /app/cli.js --headless --browser chromium --no-sandbox --isolated --snapshot-mode=none --timeout-action=1000 --timeout-navigation=3000'],
+            computer_policy={'revision':'r1','allowed_origin':ORIGIN})
+        self.spec['trust_identity']=mcp.server_identity(self.spec); self.config()
+        s=self.session(); first=s.open(ORIGIN+'/')['observation']; proc=s.server.proc
+        second=s.observe(); self.assertIs(s.server.proc,proc)
+        self.assertEqual(first['state']['binding']['tab'],second['state']['binding']['tab'])
+        view=second['view_context']; self.assertEqual(view['viewport_source'],'playwright_host')
+        self.assertGreater(view['viewport']['width'],0)
+        self.assertIn(view['device_scale_source'],('page_untrusted','unavailable'))
+        changed=dict(view['viewport'],width=view['viewport']['width']+1)
+        mcp.computer_guarded_call(s.server,'browser_run_code_unsafe',{'code':'async page => {await page.setViewportSize('+json.dumps(changed)+');}'},root=str(self.root),fresh=True,task_context=s._context)
+        with self.assertRaises(C.Refused): s.click(second,'INV-0')
+        second=s.observe()
+        result=s.click(second,'INV-0'); self.assertFalse(result['workflow_verified'])
+        environment=s._load()['environment']
+        metadata=self.CS.computerprocess.read(str(self.root),environment)
+        cid=(self.root/metadata['docker']['cidfile']).read_text().strip()
+        s.close('finished local fixture')
+        actual=subprocess.run([DOCKER,'container','ls','-a','--no-trunc','--filter','id='+cid,'--format','{{.ID}}'],capture_output=True,text=True,check=True,timeout=15,env=mcp.server_environment({}))
+        self.assertFalse(actual.stdout.strip(),'owned Docker environment still exists')
+        self.assertEqual(s.actions()[-1]['state'],'UNKNOWN')
+        print('[owned-chromium] pinned real browser reused through ComputerSession; click acknowledgment stays pending; exact container removal independently read back')
+
+    def test_prepared_and_dispatched_are_fsynced_before_input(self):
+        s=self.session(); receipt=s.open('https://example.com/')['observation']
+        syncs=[]; original=os.fsync
+        def synced(fd):
+            original(fd); syncs.append(os.fstat(fd).st_size)
+        with patch.object(os,'fsync',side_effect=synced):
+            identity=s._prepare('click',{'manual':'durable-boundary'})
+            self.assertTrue(syncs,'PREPARED was not fsynced')
+            syncs.clear(); s._dispatch(identity)
+            self.assertTrue(syncs,'DISPATCHED was not fsynced')
+        self.assertEqual(s.actions()[-1]['state'],'DISPATCHED')
+        print('[durable-boundary] actual fsync completes for PREPARED and DISPATCHED before adapter may send input')
+
+    def test_post_click_artifacts_bound_and_physical_bytes_rechecked(self):
+        (self.root/'emit-image').touch()
+        s=self.session(); receipt=s.open('https://example.com/')['observation']
+        self.assertTrue(receipt['artifacts'])
+        post=s.click(receipt,'one')['observation']
+        self.assertTrue(post['artifacts'],'post-click image metadata was dropped')
+        meta=post['artifacts'][0]; (self.root/meta['path']).write_bytes(b'changed')
+        with self.assertRaises(C.Refused): s.click(post,'two')
+        self.assertEqual((self.root/'effect-seen').read_text(),'one')
+        print('[artifact-receipts] initial and post-click receipts bind image metadata; altered physical bytes refuse before next input')
+
+    def test_replacement_task_cannot_inherit_other_role_session(self):
+        agent=self.agent()
+        agent.exec_tool(self.task,'computer_open',{'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'})
+        replacement=dict(self.task,lineage='foreign-lineage')
+        result=agent.exec_tool(replacement,'computer_observe',{})
+        self.assertTrue(result.startswith('ERROR:'),result)
+        print('[current-task-identity] replacement task object cannot silently inherit another lineage session')
+
+    def test_unproven_cleanup_keeps_taint_and_exclusion(self):
+        s=self.session(); s.open('https://example.com/')
+        with patch.object(self.CS.computerprocess,'cleanup',side_effect=RuntimeError('cleanup unproven')):
+            with self.assertRaises(RuntimeError): s.close('stop')
+        self.assertEqual(s.state,'tainted')
+        with self.assertRaises(C.Refused): self.session(dict(self.task,id='other'))
+        s.close('verified retry cleanup')
+        print('[cleanup-failclosed] unproven environment cleanup retains taint and exclusive lease')
+
+    def test_off_origin_redirect_after_navigation_is_unknown(self):
+        (self.root/'redirect-outside').touch()
+        s=self.session()
+        with self.assertRaises((C.Refused,C.Unresolved)): s.open('https://example.com/')
+        self.assertEqual(s.actions()[-1]['state'],'UNKNOWN','navigation already dispatched before off-origin observation')
+        self.assertEqual(s.state,'tainted')
+        print('[navigation-scope] off-origin post-navigation observation cannot be labeled known-no-effect refusal')
+
+    def test_empty_role_tool_allowlist_denies_computer_entry(self):
+        agent=self.agent(); agent.cfg['roles']['worker']['tools']=[]
+        result=agent.exec_tool(self.task,'computer_open',{'server_name':'fixture','policy_revision':'r1','url':'https://example.com/'})
+        self.assertTrue(result.startswith('ERROR:'),result)
+        self.assertFalse(agent._computer_sessions)
+        print('[empty-role-allowlist] explicit empty tool allowlist denies direct computer tool entry')
+
+    def test_view_context_is_sealed_and_changed_viewport_refuses(self):
+        s=self.session(); receipt=s.open('https://example.com/')['observation']
+        view=receipt['view_context']
+        self.assertEqual(view['viewport'],{'width':800,'height':600})
+        self.assertEqual(view['viewport_source'],'playwright_host')
+        self.assertEqual(view['device_scale_source'],'page_untrusted')
+        self.assertEqual(view['coordinate_mode'],'css_locator')
+        self.assertFalse(view['screenshot_coordinates_authorized'])
+        for key,value in [('viewport',{'width':1,'height':2}),('device_scale',2),
+                          ('device_scale_source','trusted'),('screenshot_coordinates_authorized',True)]:
+            altered=json.loads(json.dumps(receipt)); altered['view_context'][key]=value
+            with self.assertRaises(C.Refused): s.click(altered,'one')
+        (self.root/'viewport-width').write_text('801')
+        with self.assertRaises(C.Refused): s.click(receipt,'one')
+        self.assertFalse((self.root/'effect-seen').exists())
+        s.click(s.observe(),'one')
+        print('[view-context] sealed provenance cannot be altered; changed host viewport refuses before CSS-locator input')
+
+    def test_unavailable_view_context_is_explicit(self):
+        (self.root/'omit-view-context').touch()
+        receipt=self.session().open('https://example.com/')['observation']
+        view=receipt['view_context']
+        self.assertIsNone(view['viewport']); self.assertIsNone(view['device_scale'])
+        self.assertEqual(view['viewport_source'],'unavailable')
+        self.assertEqual(view['device_scale_source'],'unavailable')
+        self.assertFalse(view['screenshot_coordinates_authorized'])
+        print('[unavailable-view-context] missing measurements remain null, never fabricated screenshot-coordinate authority')
+
+    def test_agent_cleanup_attempts_all_owned_sessions_after_failure(self):
+        agent=self.agent()
+        (self.root/'mcp.json').write_text(json.dumps({'servers':{'fixture':self.spec,'fixture-two':self.spec}}))
+        first=self.session(); first.open('https://example.com/')
+        other=dict(self.task,id='task-two',lineage='lineage-two')
+        second=self.CS.ComputerSession(str(self.root),other,'fixture-two','r1')
+        self.addCleanup(second.close,'test cleanup'); second.open('https://example.com/')
+        agent._computer_sessions={self.task['id']:first,other['id']:second}
+        original=self.CS.computerprocess.cleanup; first_env=first._load()['environment']
+        def cleanup(root,relative,*args,**kwargs):
+            if relative==first_env: raise RuntimeError('first environment unproven')
+            return original(root,relative,*args,**kwargs)
+        with patch.object(self.CS.computerprocess,'cleanup',side_effect=cleanup):
+            with self.assertRaises(Exception): agent.close_computers('stop all')
+        self.assertEqual(first.state,'tainted'); self.assertEqual(second.state,'closed')
+        self.assertIsNotNone(second.server.proc.poll())
+        self.assertEqual(set(agent._computer_sessions),{self.task['id']})
+        with self.assertRaises(C.Refused): self.session(dict(self.task,id='third'))
+        print('[cleanup-all] first failure retains its tainted lease while every other owned environment is still closed')
+
+    def test_process_death_prepared_and_dispatched_recover_differently(self):
+        for stage, expected in [('prepared','FAILED_WITH_KNOWN_NO_EFFECT'),('dispatched','UNKNOWN')]:
+            with self.subTest(stage=stage):
+                for name in ('ready','fixture-exited','effect-seen'):
+                    (self.root/name).unlink(missing_ok=True)
+                if stage=='dispatched': (self.root/'hold-response').touch()
+                proc = subprocess.Popen([sys.executable,str(Path(__file__)), '--owner',str(self.root),stage],cwd=HERE)
+                try:
+                    wait_file(self.root/('ready' if stage=='prepared' else 'effect-seen'))
+                    proc.kill(); proc.wait(timeout=5)
+                    recovered = self.session()
+                    environment=recovered._load()['environment']
+                    self.assertEqual(self.CS.computerprocess.read(str(self.root),environment)['state'],'closed')
+                    clicks = [a for a in recovered.actions() if a['operation']=='click']
+                    self.assertEqual(clicks[-1]['state'],expected)
+                    recovered.close('test')
+                finally:
+                    if proc.poll() is None: proc.kill(); proc.wait(timeout=5)
+        print('[crash-boundaries] killed real owners recover PREPARED as no-effect and DISPATCHED as UNKNOWN; owned environment closure confirmed')
+
+def owner(root, stage):
+    import computersession
+    task = {'id':'task-one','lineage':'lineage-one','role':'worker','status':'running'}
+    s = computersession.ComputerSession(root,task,'fixture','r1')
+    receipt = s.open('https://example.com/')['observation']
+    if stage=='prepared':
+        original = s.server.call
+        def held(*args,**kwargs):
+            Path(root,'ready').touch()
+            while True: time.sleep(.05)
+        s.server.call = held
+    if stage=='blocked':
+        threading.Thread(target=lambda:s.server.call('stop_reading',{}),daemon=True).start()
+        wait_file(Path(root,'ready'))
+        s.server.call('blocked_write',{'payload':'x'*2_000_000})
+        return
+    s.click(receipt,'one')
+
+if __name__=='__main__':
+    if '--owner' in sys.argv: owner(sys.argv[2],sys.argv[3])
+    else: unittest.main()

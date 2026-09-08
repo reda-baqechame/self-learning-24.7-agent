@@ -58,7 +58,7 @@ def server_environment(spec, environ=None):
 def server_identity(spec):
     """Identity of owner-approved code/config, never the raw credential."""
     fields = ("cmd", "args", "shell", "version", "integrity", "source",
-              "env_allow", "env", "atomic_browser_adapter", "computer_locator_tool")
+              "env_allow", "env", "atomic_browser_adapter", "computer_locator_tool", "computer_policy")
     blob = json.dumps({k: spec[k] for k in fields if k in spec},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -96,16 +96,21 @@ def load_servers(root):
 class Server:
     """One spawned MCP server over stdio, newline-delimited JSON-RPC."""
 
-    def __init__(self, name, spec, cwd=None, timeout=30):
+    def __init__(self, name, spec, cwd=None, timeout=30, owned_process=None):
         self.name = name
         self.timeout = timeout
         cmd = [spec["cmd"]] + list(spec.get("args") or [])
         validate_identity(spec)
         env = server_environment(spec)
+        self.owned_process = owned_process
+        if owned_process is not None:
+            import computerprocess
+            cmd=computerprocess.command(spec,*owned_process)
         self.proc = subprocess.Popen(
             cmd, cwd=cwd, env=env, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", bufsize=1,
+            start_new_session=owned_process is not None and os.name!='nt',
             shell=isinstance(spec["cmd"], str) and os.name == "nt"
             and spec.get("shell", False))
         self._id = 0
@@ -120,12 +125,14 @@ class Server:
         self._reader.start()
 
     # --- plumbing -------------------------------------------------------
-    def _send(self, msg):
+    def _send(self, msg, before_send=None):
         with self._send_lock:
             with self._pending_lock:
                 if self._terminal_error is not None:
                     raise RuntimeError(self._terminal_error)
             try:
+                if before_send is not None:
+                    before_send()
                 self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
                 self.proc.stdin.flush()
             except (OSError, ValueError) as exc:
@@ -177,7 +184,7 @@ class Server:
         except (OSError, ValueError):
             self._terminate("MCP transport closed while reading a frame")
 
-    def _rpc(self, method, params=None):
+    def _rpc(self, method, params=None, before_send=None):
         with self._id_lock:
             self._id += 1
             request_id = self._id
@@ -192,7 +199,10 @@ class Server:
         if params is not None:
             msg["params"] = params
         try:
-            self._send(msg)
+            if before_send is None:
+                self._send(msg)
+            else:
+                self._send(msg, before_send=before_send)
             slot["event"].wait(self.timeout)
             with self._pending_lock:
                 if "error" in slot:
@@ -235,12 +245,16 @@ class Server:
             self.tools()
         return self._tool_index.get(name)
 
-    def call(self, tool, arguments):
+    def call(self, tool, arguments, before_send=None):
         return self._rpc("tools/call",
-                         {"name": tool, "arguments": arguments or {}})
+                         {"name": tool, "arguments": arguments or {}},
+                         before_send=before_send)
 
     def close(self):
         self._terminate("MCP transport closed by client")
+        if self.owned_process is not None:
+            import computerprocess
+            computerprocess.cleanup(*self.owned_process)
         deadline = time.monotonic() + READER_JOIN_TIMEOUT_SECONDS
         # Kill before touching the pipe locks: a server that stopped reading
         # stdin can have a sender blocked in write/flush. Killing releases it.
@@ -338,7 +352,7 @@ def _tool_allowed(spec, tool):
     return (not allow) or (tool in allow)
 
 
-def connect(root, name, timeout=30, role=None):
+def connect(root, name, timeout=30, role=None, owned_process=None):
     servers = load_servers(root)
     if name not in servers:
         known = ", ".join(sorted(servers)) or "none configured"
@@ -349,7 +363,8 @@ def connect(root, name, timeout=30, role=None):
         raise SystemExit(f"MCP server '{name}' is not allowed for role "
                          f"'{role}' (allow_roles in mcp.json). This is the "
                          f"owner's policy, not a bug.")
-    s = Server(name, servers[name], cwd=root, timeout=timeout)
+    s = (Server(name, servers[name], cwd=root, timeout=timeout,owned_process=owned_process)
+         if owned_process is not None else Server(name, servers[name], cwd=root, timeout=timeout))
     s.spec = servers[name]
     try:
         s.handshake()
@@ -458,13 +473,16 @@ def _nullcontext():
 _COMPUTER_AUTHORITY = object()
 
 
-def computer_guarded_call(s, tool, arguments, root=None, fresh=False):
+def computer_guarded_call(s, tool, arguments, root=None, fresh=False,
+                          task_context=None, before_send=None):
     """Platform computer adapter entry; not exposed by the MCP CLI."""
     return guarded_call(s, tool, arguments, root=root, fresh=fresh,
-                        _authority=_COMPUTER_AUTHORITY)
+                        _authority=_COMPUTER_AUTHORITY,
+                        _task_context=task_context, _before_send=before_send)
 
 
-def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
+def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None,
+                 _task_context=None, _before_send=None):
     """tools/call through the owner's policy AND the effects ledger:
     denied tools never reach the server; identical calls inside one task
     lineage are replayed from the ledger instead of hitting the world twice
@@ -501,6 +519,10 @@ def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
     root = root or os.environ.get("AGENT_ROOT") or os.getcwd()
     lineage = os.environ.get("AGENT_TASK_LINEAGE") or "manual"
     task_id = os.environ.get("AGENT_TASK_ID", "-")
+    if _task_context is not None:
+        if _authority is not _COMPUTER_AUTHORITY:
+            raise ValueError("explicit computer identity requires internal authority")
+        task_id, lineage = _task_context["task_id"], _task_context["lineage"]
     import effects
     import locks
     key = effects.key_of(lineage, s.name, tool, arguments)
@@ -563,7 +585,8 @@ def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None):
                         f"owner clears it in the effects ledger."}]}, \
                     "unresolved"
             effects.begin(root, key, task_id, s.name, tool, arguments)
-    result = s.call(tool, arguments)
+    result = (s.call(tool, arguments, before_send=_before_send)
+              if _before_send is not None else s.call(tool, arguments))
     if key:
         effects.record(root, key, task_id, s.name, tool, arguments, result,
                        is_error=bool(result.get("isError")))

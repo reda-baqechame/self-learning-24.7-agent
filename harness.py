@@ -385,6 +385,12 @@ def integrity(root=None):
         for fn in filenames:
             if fn.endswith(".lock") or fn.endswith(".mutex"):
                 p = os.path.join(dirpath, fn)
+                rel = os.path.relpath(p, root).replace(os.sep, "/")
+                # Persistent OS locks are not abandoned by age and their inode
+                # must never be removed, including after a clean release.
+                if (fn == 'settings.toml.update.lock' or
+                        (rel.startswith('effects/computer/') and fn.endswith('.lease.lock'))):
+                    continue
                 try:
                     if now - os.path.getmtime(p) > STALE_LOCK_SECONDS:
                         rel = os.path.relpath(p, root).replace(os.sep, "/")

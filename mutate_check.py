@@ -21,6 +21,55 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("computer session correction: viewport recheck removed", "computeruse.py",
+     '    if(p.view_context){', '    if(false){',
+     "test_computer_session.py", "real host viewport change must refuse before input", False, ('AGENT_COMPUTER_LIVE','1')),
+    ("computer session correction: cleanup stops at first failure", "loop.py",
+     '                    errors.append(error)', '                    raise',
+     "test_computer_session.py", "later owned sessions must close even when an earlier environment cleanup fails"),
+    ("computer session: process reuse removed", "computersession.py",
+     '        if self.server is None:\n            environment=',
+     '        if True:\n            environment=',
+     "test_computer_session.py", "turns and failover must retain the same owned process"),
+    ("computer session: exclusive lease bypassed", "computersession.py",
+     '            self._lease.__enter__()', '            self._lease = None',
+     "test_computer_session.py", "a second task cannot take an existing task browser"),
+    ("computer session: epoch receipt verification removed", "computersession.py",
+     '            observation=self._unseal(receipt)', '            observation=receipt[\'observation\']',
+     "test_computer_session.py", "task envelope and physical artifact integrity must be verified"),
+    ("computer session: PREPARED persistence removed", "computersession.py",
+     "        data['actions'].append(action); self._save(data)", "        data['actions'].append(action)",
+     "test_computer_session.py", "intent must exist durably before dispatch"),
+    ("computer session: DISPATCHED transport hook removed", "mcp.py",
+     '                if before_send is not None:\n                    before_send()',
+     '                if False:\n                    before_send()',
+     "test_computer_session.py", "killed dispatch owner must recover UNKNOWN, never known-no-effect"),
+    ("computer session: fsync removed", "computersession.py",
+     "fileauth.write_json(self.root,self._rel,data,actor='harness',durable=True)",
+     "fileauth.write_json(self.root,self._rel,data,actor='harness')",
+     "test_computer_session.py", "PREPARED and DISPATCHED require completed file fsync"),
+    ("computer session: UNKNOWN lineage retry allowed", "computersession.py",
+     "        if mutation and any(a['state']=='UNKNOWN' and not self._resolved(a) for a in self.actions()):",
+     "        if False:", "test_computer_session.py", "a fresh retry task cannot escape unknown lineage history"),
+    ("computer session: pending click certified", "computersession.py",
+     '                self._update(identity,dispatch_acknowledged=True)',
+     "                self._update(identity,state='VERIFIED',dispatch_acknowledged=True)",
+     "test_computer_session.py", "dispatch acknowledgment never proves workflow completion"),
+    ("computer session: terminal cleanup removed", "loop.py",
+     "            self.close_computers('task '+task['status'], task['id'])",
+     '            pass', "test_computer_session.py", "done and failed tasks release no live process"),
+    ("computer session: direct role allowlist removed", "loop.py",
+     "            if role_tools is not None and name not in role_tools:",
+     '            if False:', "test_computer_session.py", "direct tool callers cannot bypass a denied role"),
+    ("computer session: owner-only reconciliation removed", "computersession.py",
+     "        controlplane.owner_only('reconcile computer action')", '        pass',
+     "test_computer_session.py", "worker environment cannot attest its own effect"),
+    ("computer session: raw evaluator exposed", "mcp.py",
+     '            and _authority is not _COMPUTER_AUTHORITY):', '            and False):',
+     "test_computeruse.py", "generic raw code remains denied on the bounded adapter"),
+    ("computer session: process-tree supervisor bypassed", "mcp.py",
+     '            cmd=computerprocess.command(spec,*owned_process)', '            pass',
+     "test_computer_session.py", "owned grandchild must lose execution at session finalization"),
     ("mcp transport: second stdout reader", "mcp.py",
      '        self._reader.start()',
      '        self._reader.start()\n        threading.Thread(target=self._read_frames, daemon=True).start()',
@@ -649,6 +698,10 @@ def main():
         # can trust is worse than no skip line.
         posix_only = entry[6] if len(entry) > 6 else False
         if only and only not in label:
+            continue
+        required_env = entry[7] if len(entry) > 7 else None
+        if required_env and os.environ.get(required_env[0]) != required_env[1]:
+            results.append((label, "SKIP", "requires " + "=".join(required_env)))
             continue
         if posix_only and os.name == "nt":
             why = posix_only if isinstance(posix_only, str) else \

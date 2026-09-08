@@ -320,7 +320,7 @@ def read_text(root, rel, actor="agent", limit=None, encoding="utf-8"):
         return f.read() if limit is None else f.read(limit)
 
 
-def write_text(root, rel, text, actor="agent", encoding="utf-8"):
+def write_text(root, rel, text, actor="agent", encoding="utf-8", durable=False):
     """Contained, then ATOMIC: write a unique temp beside the target and
     replace. A crash mid-write leaves the previous file whole rather than a
     truncated one, and two writers cannot share a scratch name."""
@@ -332,6 +332,9 @@ def write_text(root, rel, text, actor="agent", encoding="utf-8"):
     tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp, "w", encoding=encoding) as f:
         f.write(text)
+        if durable:
+            f.flush()
+            os.fsync(f.fileno())
     for attempt in range(8):
         try:
             os.replace(tmp, p)
@@ -392,10 +395,10 @@ def write_bytes(root, rel, data, actor="agent"):
     return p
 
 
-def write_json(root, rel, obj, actor="agent", indent=1):
+def write_json(root, rel, obj, actor="agent", indent=1, durable=False):
     return write_text(root, rel,
                       json.dumps(obj, indent=indent, ensure_ascii=False) + "\n",
-                      actor=actor)
+                      actor=actor,durable=durable)
 
 
 def describe():
