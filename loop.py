@@ -4531,9 +4531,15 @@ class Agent:
 
     def run(self, drain=False):
         try:
-            return self._run(drain)
-        finally:
-            self.close_computers('runtime exit')
+            result=self._run(drain)
+        except BaseException as primary:
+            try:
+                self.close_computers('runtime exit')
+            except BaseException as cleanup:
+                primary.add_note('Computer cleanup also failed: '+repr(cleanup))
+            raise
+        self.close_computers('runtime exit')
+        return result
 
     def _run(self, drain=False):
         self.log.info(json.dumps({"event": "agent_start", "root": self.root, "drain": drain}))

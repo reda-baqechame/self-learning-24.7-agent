@@ -64,7 +64,7 @@ continuously, prove what they did, and remember what they learned.**
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![tests](https://img.shields.io/badge/tests-158%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-115%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-116%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
 121 Python modules · 158 registered acceptance tests · one HTML control panel · no

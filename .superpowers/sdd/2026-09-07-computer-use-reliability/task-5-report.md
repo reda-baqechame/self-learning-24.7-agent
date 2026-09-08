@@ -350,3 +350,66 @@ this report. Protected dirty file SHA256 rechecked unchanged immediately before
 handoff: mock_effect_server.py
 `7CA5E3E55BAE18A1E7FE04E06ECBDAB8CC2174F01C812538F8FBF5D6BDDFB2BF`;
 ui.html `E7E050E58A9E5D39FC8919FD6D10DC65F7DA1190C5680DEC6502CDCBB6086BBF`.
+
+## Review fix round 2 (base 2a857beb21116fc1d8e4ae79adec26eca8e0ffd1)
+
+DONE_WITH_CONCERNS, ready for controller re-review. Re-review accepted the six original repairs and identified one
+remaining public run-boundary defect: cleanup's ordinary ExceptionGroup replaced
+a main-body KeyboardInterrupt/SystemExit. TDD/debug/verification skills and
+testing references reread. No other authority, UI, provider or Task 6 scope added.
+
+Exact focused command, with `AGENT_TEST_TMP=C:\tmp\c5-r2 PYTHONUTF8=1`:
+`python tests/test_computer_session.py
+Sessions.test_run_main_exception_survives_cleanup_failure
+Sessions.test_run_success_still_reports_cleanup_failure`.
+RED: 2 methods, 3 subtest failures, 3.368s (`task-5-r2-red.log`): KeyboardInterrupt,
+SystemExit(17), ValueError each replaced by cleanup's ExceptionGroup. Two real
+owned sessions prove the later session closes despite first cleanup failure.
+The successful-main control already passed: cleanup failure must still raise,
+and a verified clean finalization must preserve the return value.
+
+Smallest fix separates failed and successful main completion in Agent.run.
+Failed main: attempt all cleanup, attach any cleanup exception diagnostically
+as a note, then bare re-raise the original BaseException with its original cause.
+Successful main: retain ordinary cleanup error propagation before returning.
+GREEN: same two methods PASS, 3.647s (`task-5-r2-green.log`). Added one
+targeted mutation; no new acceptance file/module, registry count remains 158 /
+121, README mutation badge now 116. No full repo suite is authorized in this round.
+
+Targeted mutation: `AGENT_TEST_TMP=C:\tmp\c5-r2 AGENT_COMPUTER_LIVE=0
+PYTHONUTF8=1 python mutate_check.py 'computer run boundary:'`: **1 caught,
+0 missed, 0 skipped**, 26s, captured `task-5-r2-mutation.log`. Source restored.
+
+Final restored-source batch: `AGENT_TEST_TMP=C:\tmp\c5-r2-final`,
+`AGENT_COMPUTER_LIVE=1`, `PYTHONUTF8=1`; sequential `python <script>` commands
+below, all output appended through PowerShell Tee-Object to
+`task-5-r2-final-focused.log`; count nonzero exits and return that count.
+Aggregate exit **0**, no concurrent source mutations or edits.
+
+- `tests/test_computer_session.py`: 33 run, **32 PASS / 1 native POSIX SKIP**,
+  31.758s, including real pinned network-none Chromium/session cleanup.
+- `tests/test_computeruse.py`: 16 PASS, 0.399s.
+- `tests/test_mcp_hardening.py`: 15 PASS, 1.467s.
+- `tests/test_harness.py`: PASS.
+- `tests/test_loop_learning_controls.py`: 6 PASS, 2.590s.
+- `tests/test_providers.py`: PASS, native-backslash root, no provider edits.
+- `tests/test_invariants.py`: PASS, 121 modules / 158 acceptance files,
+  zero execution audit violations / 19 declared internals.
+- `tests/test_ledger_defects.py`: PASS, 158 acceptance files / 116 mutations.
+- `tests/test_computeruse_live.py`: all 17 local synthetic Chromium cases PASS.
+- `git diff --check`: PASS; targeted mutation anchor unique, registry 116.
+
+Self-review: the wrapper preserves original exception identity, traceback/cause
+and SystemExit code, and records the actual grouped cleanup failures in a note.
+It does not stop cleanup early, discard tainted sessions, or convert a successful
+main-body result into success when cleanup fails. Ordinary main failures remain
+raised with cleanup diagnostics; successful clean return values are unchanged.
+Only loop.py, the existing session test file, mutate_check.py, README.md and this
+report change in round 2. No new file/module registration is needed.
+
+Limitations unchanged: native POSIX qualification and final whole-tree Task 6
+suite/controller review remain pending. No full suite, paid/live provider,
+production, push/merge or unrelated-worktree changes. Protected hashes unchanged:
+tests/mock_effect_server.py
+`7CA5E3E55BAE18A1E7FE04E06ECBDAB8CC2174F01C812538F8FBF5D6BDDFB2BF`;
+ui.html `E7E050E58A9E5D39FC8919FD6D10DC65F7DA1190C5680DEC6502CDCBB6086BBF`.

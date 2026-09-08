@@ -21,6 +21,9 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("computer run boundary: cleanup replaces main exception", "loop.py",
+     "                primary.add_note('Computer cleanup also failed: '+repr(cleanup))",
+     '                raise', "test_computer_session.py", "main cancellation/exit must survive cleanup failure after all sessions are attempted"),
     ("computer review interaction: quarantine masks interruption", "computersession.py",
      "            original.add_note('Quarantine refresh failed: '+type(persistence_error).__name__)",
      '            raise', "test_computer_session.py", "storage failure must not replace the original system interruption"),

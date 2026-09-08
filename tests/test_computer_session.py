@@ -462,6 +462,45 @@ class Sessions(unittest.TestCase):
         self.assertTrue(self.CS.computerprocess.read(str(self.root),s._owner_rel)['environment'])
         print('[interrupt-primary] failure to refresh quarantine cannot mask system interruption; prior durable environment still excludes new claimants')
 
+    def test_run_main_exception_survives_cleanup_failure(self):
+        for primary in (KeyboardInterrupt('cancel main'),SystemExit(17),ValueError('main failed')):
+            with self.subTest(primary=type(primary).__name__):
+                agent=self.agent()
+                (self.root/'mcp.json').write_text(json.dumps({'servers':{'fixture':self.spec,'fixture-two':self.spec}}))
+                first=self.session(); first.open('https://example.com/')
+                second=self.CS.ComputerSession(str(self.root),dict(self.task,id='second',lineage='second'),'fixture-two','r1')
+                self.addCleanup(second.close,'test'); second.open('https://example.com/')
+                agent._computer_sessions={self.task['id']:first,'second':second}
+                original=self.CS.computerprocess.cleanup; environment=first._load()['environment']
+                cause=RuntimeError('original cause'); primary.__cause__=cause
+                def cleanup(root,rel):
+                    if rel==environment: raise RuntimeError('cleanup unproven')
+                    return original(root,rel)
+                caught=None
+                with patch.object(agent,'_run',side_effect=primary), patch.object(self.CS.computerprocess,'cleanup',side_effect=cleanup):
+                    try: agent.run()
+                    except BaseException as error: caught=error
+                self.assertEqual(first.state,'tainted'); self.assertEqual(second.state,'closed')
+                self.assertIsNotNone(second.server.proc.poll())
+                agent.close_computers('verified test cleanup')
+                self.assertIs(caught,primary,'run main exception was replaced by cleanup failure')
+                self.assertIs(caught.__cause__,cause,'original cause was overwritten')
+                self.assertTrue(any('cleanup unproven' in note for note in caught.__notes__))
+                if isinstance(primary,SystemExit): self.assertEqual(caught.code,17)
+        print('[run-primary-exception] public run preserves cancellation, exit code and ordinary failure while every session cleanup is attempted and diagnosed')
+
+    def test_run_success_still_reports_cleanup_failure(self):
+        agent=self.agent(); s=self.session(); s.open('https://example.com/')
+        agent._computer_sessions={self.task['id']:s}
+        with patch.object(agent,'_run',return_value='main result'), patch.object(self.CS.computerprocess,'cleanup',side_effect=RuntimeError('cleanup unproven')):
+            with self.assertRaises(ExceptionGroup) as raised: agent.run()
+        self.assertEqual(str(raised.exception.exceptions[0]),'cleanup unproven')
+        self.assertEqual(s.state,'tainted')
+        agent.close_computers('verified test cleanup')
+        with patch.object(agent,'_run',return_value='main result'):
+            self.assertEqual(agent.run(),'main result')
+        print('[run-success-cleanup] successful main cannot suppress cleanup failure; verified clean finalization preserves its return value')
+
     def test_docker_endpoint_environment_refuses_before_spawn(self):
         for selector in ('DOCKER_HOST','DOCKER_CONTEXT','DOCKER_CONFIG','DOCKER_TLS_VERIFY'):
             with self.subTest(selector=selector):
