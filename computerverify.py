@@ -257,7 +257,11 @@ def _safe_directory(root,relative):
         if not stat.S_ISDIR(info.st_mode):
             raise C.Refused('output ancestor is not a directory')
     resolved=fileauth.resolve(root,relative,'read','harness')
-    if os.path.normcase(os.path.abspath(resolved))!=os.path.normcase(base):
+    try:
+        same_directory=os.path.samefile(resolved,base)
+    except OSError as error:
+        raise C.Refused('output directory identity could not be established') from error
+    if not same_directory:
         raise C.Refused('output directory identity changed')
     return base
 

@@ -21,6 +21,11 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("computer postcondition: output identity reduced to path-string equality", "computerverify.py",
+     "        same_directory=os.path.samefile(resolved,base)",
+     "        same_directory=(os.path.normcase(os.path.abspath(resolved))==os.path.normcase(base))",
+     "test_computer_postconditions.py",
+     "alternate filesystem spellings must be compared by object identity while mismatches fail closed"),
     ("computer postcondition: duplicate action identity accepted", "computerverify.py",
      "        if len(action_identities)!=len(set(action_identities)):\n            raise C.Refused('registered computer action identity is not unique')",
      "        if False:\n            raise C.Refused('registered computer action identity is not unique')",

@@ -149,6 +149,26 @@ class Postconditions(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             with computersession.locks.advisory_holding(lease,timeout=0): pass
 
+    def test_output_directory_uses_physical_identity_not_path_spelling(self):
+        actual=str(self.root/self.output_rel)
+        alternate=actual+'-alternate-spelling'
+        with mock.patch.object(fileauth,'resolve',return_value=alternate), \
+             mock.patch.object(os.path,'samefile',return_value=True) as samefile:
+            binding=computerverify.output_binding(str(self.root),self.output_rel)
+        samefile.assert_called_once_with(alternate,actual)
+        self.assertEqual(binding,computerverify.output_binding(
+            str(self.root),self.output_rel))
+
+        with mock.patch.object(fileauth,'resolve',return_value=alternate), \
+             mock.patch.object(os.path,'samefile',return_value=False):
+            with self.assertRaisesRegex(C.Refused,'identity changed'):
+                computerverify.output_binding(str(self.root),self.output_rel)
+
+        with mock.patch.object(fileauth,'resolve',return_value=alternate), \
+             mock.patch.object(os.path,'samefile',side_effect=OSError('unknown')):
+            with self.assertRaisesRegex(C.Refused,'could not be established'):
+                computerverify.output_binding(str(self.root),self.output_rel)
+
     def test_one_session_cannot_freeze_two_workflows_on_same_output(self):
         session=self.session(); first=self.freeze(session,[self.intents[0]])
         with self.assertRaises(C.Refused):
