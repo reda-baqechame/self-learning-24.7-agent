@@ -333,10 +333,11 @@ class Sessions(unittest.TestCase):
                 os.close(fd)
             return old
 
-        real_open=open; swapped=[]
+        real_open=open; swapped=[]; attempted=[]
         def racing_open(path,*args,**kwargs):
             if os.path.normcase(os.fspath(path))==os.path.normcase(str(target)) \
                     and args and args[0]=='rb' and not swapped:
+                attempted.append(True)
                 swapped.append(replace_inode('.before'))
             return real_open(path,*args,**kwargs)
         # Credential classification has its own alias/hard-link coverage above.
@@ -346,7 +347,14 @@ class Sessions(unittest.TestCase):
                 patch('builtins.open',side_effect=racing_open):
             with self.assertRaises(C.Refused):
                 s._artifact(meta,allow_zones=allowed)
-        target.unlink(); os.replace(swapped[0],target)
+        self.assertTrue(attempted)
+        if swapped:
+            target.unlink(); os.replace(swapped[0],target)
+        else:
+            # Windows may deny renaming an object while the anchor descriptor
+            # is open.  That is a safe refusal at the same boundary; POSIX
+            # must complete the swap so the identity comparison is exercised.
+            self.assertEqual(os.name,'nt')
 
         real_resolve=F.resolve; calls=0; replaced=[]
         def racing_resolve(root,rel,*args,**kwargs):
@@ -360,7 +368,7 @@ class Sessions(unittest.TestCase):
         with patch.object(F,'resolve',side_effect=racing_resolve):
             with self.assertRaises(C.Refused):
                 s._artifact(meta,allow_zones=allowed)
-        print('[artifact-race] same-size/same-digest inode replacement before open and after read both refuse before reconciliation state can change')
+        print('[artifact-race] an open identity anchor blocks or detects same-bytes replacement before read; post-read replacement also refuses before reconciliation state can change')
 
     def test_persistent_lease_health_never_recommends_deletion(self):
         import harness, locks

@@ -302,23 +302,31 @@ class ComputerSession:
     def _artifact_checked(self,meta,allow_zones=None):
         path=fileauth.resolve(self.root,meta['path'],'read','harness',
                               allow_zones=allow_zones)
-        before=C._no_links(path)
-        with open(path,'rb') as f:
-            info=os.fstat(f.fileno())
-            if ((info.st_dev,info.st_ino)!=(before.st_dev,before.st_ino)
-                    or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
-                    or info.st_size!=meta['bytes']):
-                raise C.Refused('artifact identity or size changed')
-            raw=f.read(meta['bytes']+1)
-        if hashlib.sha256(raw).hexdigest()!=meta['sha256']:
-            raise C.Refused('artifact bytes changed')
-        if fileauth.resolve(self.root,meta['path'],'read','harness',
-                            allow_zones=allow_zones)!=path:
-            raise C.Refused('artifact path changed')
-        after=C._no_links(path)
-        if (after.st_dev,after.st_ino)!=(info.st_dev,info.st_ino):
-            raise C.Refused('artifact path changed')
-        return raw
+        anchor_fd=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0))
+        try:
+            anchor=os.fstat(anchor_fd)
+            before=C._no_links(path)
+            if ((before.st_dev,before.st_ino)!=(anchor.st_dev,anchor.st_ino)
+                    or not stat.S_ISREG(anchor.st_mode) or anchor.st_nlink!=1):
+                raise C.Refused('artifact identity changed before read')
+            with open(path,'rb') as f:
+                info=os.fstat(f.fileno())
+                if ((info.st_dev,info.st_ino)!=(anchor.st_dev,anchor.st_ino)
+                        or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+                        or info.st_size!=meta['bytes']):
+                    raise C.Refused('artifact identity or size changed')
+                raw=f.read(meta['bytes']+1)
+            if hashlib.sha256(raw).hexdigest()!=meta['sha256']:
+                raise C.Refused('artifact bytes changed')
+            if fileauth.resolve(self.root,meta['path'],'read','harness',
+                                allow_zones=allow_zones)!=path:
+                raise C.Refused('artifact path changed')
+            after=C._no_links(path)
+            if (after.st_dev,after.st_ino)!=(anchor.st_dev,anchor.st_ino):
+                raise C.Refused('artifact path changed')
+            return raw
+        finally:
+            os.close(anchor_fd)
 
     def open(self,url):
         with self._serial:

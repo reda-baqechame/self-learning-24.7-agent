@@ -256,12 +256,14 @@ MUTATIONS = [
      '''        "verifier_build_sha256": "0" * 64,''', "test_computerbench.py",
      "challenge identity must change when the external verifier build changes"),
     ("computerbench: missing external artifact escapes contract refusal", "computerbench_verifier.py",
-     '''    except ContractError:
-        raise
-    except OSError as error:
-        raise ContractError(label + " secure open refused") from error''',
-     '''    except ContractError:
-        raise''', "test_computerbench.py",
+     '''    except OSError as error:
+        raise ContractError(label + " secure open refused") from error
+    finally:
+        os.close(directory)''',
+     '''    except FileExistsError as error:
+        raise ContractError(label + " secure open refused") from error
+    finally:
+        os.close(directory)''', "test_computerbench.py",
      "missing or unreadable external evidence must remain a non-success contract result",
      "Windows production refuses before the POSIX descriptor-open branch"),
     ("evidence: output after machine terminal accepted", "evidence.py",
@@ -412,17 +414,19 @@ MUTATIONS = [
      "missing or concurrently removed evidence must be a recoverable refusal"),
     ("computer session: artifact pre-open inode binding removed",
      "computersession.py",
-     '''            if ((info.st_dev,info.st_ino)!=(before.st_dev,before.st_ino)
-                    or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1''',
-     '''            if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1''',
+     '''                if ((info.st_dev,info.st_ino)!=(anchor.st_dev,anchor.st_ino)
+                        or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1''',
+     '''                if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1''',
      "test_computer_session.py",
-     "a pathname replacement between lstat and open must refuse"),
+     "a pathname replacement between the anchor and read descriptor must refuse",
+     "Windows can deny replacement while the anchor is open; POSIX permits the rename and exercises this comparison"),
     ("computer session: artifact post-read inode binding removed",
      "computersession.py",
-     '''        if (after.st_dev,after.st_ino)!=(info.st_dev,info.st_ino):''',
-     '''        if False:''',
+     '''            if (after.st_dev,after.st_ino)!=(anchor.st_dev,anchor.st_ino):''',
+     '''            if False:''',
      "test_computer_session.py",
-     "a pathname replacement after descriptor read must refuse"),
+     "a pathname replacement after descriptor read must refuse",
+     "Windows can deny replacement while the anchor is open; POSIX permits the rename and exercises this comparison"),
     ("computer session: raw evaluator exposed", "mcp.py",
      '            and _authority is not _COMPUTER_AUTHORITY):', '            and False):',
      "test_computeruse.py", "generic raw code remains denied on the bounded adapter"),

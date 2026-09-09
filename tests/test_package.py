@@ -731,6 +731,8 @@ def check_platform_specific_mutations_are_honest(_work):
     for label in (
             "fileauth: dot path borrows trusted prefix zone",
             "computer session: caller reclassifies physical alias spelling",
+            "computer session: artifact pre-open inode binding removed",
+            "computer session: artifact post-read inode binding removed",
             "computerbench: missing external artifact escapes contract refusal"):
         entry = entries[label]
         assert len(entry) > 6 and entry[6], (
