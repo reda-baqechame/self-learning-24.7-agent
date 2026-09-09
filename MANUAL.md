@@ -244,7 +244,20 @@ dialogs, 40 px targets.
 | `python recall.py "query"` | search everything: notes, skills, archived turns |
 | `python mcp.py list\|call <server> <tool>` | MCP client for the verified legacy stdio `2025-06-18` protocol; other eras are not claimed |
 | `python computerbench.py development --opt-in --run-dir <empty> --docker <path>` | run the known synthetic portal fixtures through `ComputerSession`; development evidence only |
-| `python computerbench.py acceptance --pack <external> --pack-seal <external> --owner-trust <external> --results <external> --results-seal <external>` | validate a separately supplied owner-authenticated acceptance contract; without sealed external results, acceptance is false |
+| `python computerbench.py acceptance` | always exits nonzero and directs the operator to the separately installed external verifier; candidate code cannot accept itself |
+| `/opt/expert-fleet/computerbench-verifier/computerbench-verifier issue-challenge --trust-id <id> --candidate-archive <package.zip>` | root-owned fixed POSIX launcher only: sanitized environment and fixed `/usr/bin/python3 -I -S`, then issue a challenge bound to exact inert archive bytes, its safely parsed manifest, launcher/verifier build and fixed public trust metadata |
+| `/opt/expert-fleet/computerbench-verifier/computerbench-verifier acceptance --trust-id <id> --candidate-archive <package.zip> --pack <external> --pack-seal <external> --results <external> --results-seal <external>` | external verification only; returns success solely for complete independently signed results and durable challenge consumption; direct execution of the `.py` file refuses |
+
+Neither CLI provisions trust or signs artifacts. The candidate CLI has no
+challenge authority. A deployment administrator installs the verifier source,
+root-owned public issuer/evaluator keys and dedicated verifier/worker UID
+metadata out of band; private keys remain with the separate principals. This
+repository merely ships source and fixed-launcher installation templates. The
+launcher is root-owned executable; the verifier source is root-owned but
+non-executable. Fixed `/usr/bin/python3 -I -S` plus an allowlist-only environment
+exclude worker `PATH`, `PYTHONPATH`, user-site and `sitecustomize` before imports.
+Windows and an absent or
+misowned fixed installation are intentionally acceptance-false.
 | `python federation.py card\|peers` | A2A identity and peers |
 | `python package.py` | ship a clean zip (no keys, no logs, no contexts) |
 | `python demo.py` | the whole platform, keyless, in one run |

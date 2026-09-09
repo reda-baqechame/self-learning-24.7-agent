@@ -7,7 +7,7 @@ logic it runs, how you interact with it, and what it does **not** do.
 written by reading the code, not from memory; where a claim could rot, the
 test that keeps it honest is named.
 
-**Scale, so you know what you are reading about:** 122 Python modules,
+**Scale, so you know what you are reading about:** 123 Python modules,
 one HTML file for the whole UI, 159 registered acceptance tests, zero third-party
 dependencies. Python 3.11+ and your own API keys.
 
@@ -1252,11 +1252,23 @@ approvals. (`test_mcp.py`)
 
 `computerbench.py` keeps two evidence levels separate. Its known 36-case portal
 run is deterministic development coverage through the task-owned
-`ComputerSession`; its external acceptance contract requires a separately
-supplied, content-sealed pack and results authenticated by independent owner
-trust outside worker-authored content. It freezes model, tool, policy, budget,
-retries and human help and labels browser-only, native-desktop and API-assisted
-tracks separately. With no external pack, acceptance stays false. Neither MCP
+`ComputerSession`. Its earlier 12/15/9 result is retained historical evidence,
+not current-source clearance, because unreconciled `UNKNOWN` actions were
+classified from case names. The corrected classifier makes every such action
+unresolved and requires a fresh measured batch. The external acceptance contract
+uses a fixed root-owned public trust store selected only by trust ID, distinct
+issuer/evaluator RSA public keys, a dedicated nonroot verifier UID distinct from
+the worker, and a root-owned fixed launcher that invokes fixed
+`/usr/bin/python3 -I -S` under an allowlist-only environment before verifier
+imports. The verifier module is non-executable and direct entry refuses; worker
+`PATH`, `PYTHONPATH`, user-site and `sitecustomize` cannot precede validation.
+The launcher and verifier bytes are both bound into the verifier-build identity,
+along with complete package/config identity and a short-lived single-use
+challenge with durable replay tombstones. Trust provisioning and signing happen
+outside this verification-only CLI. Internal synthetic backends never establish independence.
+It freezes model, tool, policy, budget, retries and human help and labels
+browser-only, native-desktop and API-assisted tracks separately. With no secure
+owner authority or external pack, acceptance stays false. Neither MCP
 API compatibility nor DOM/action dispatch establishes model competence or
 business success. (`test_computerbench.py`)
 
@@ -1927,7 +1939,7 @@ green is a table nobody consulted.
 
 | Release | Minimum gate | Position |
 |---|---|---|
-| **Developer build** | offline suite + harness + no unexplained changes | **CLEARED.** 93 tests twice, `harness.py --check` exit 0, working tree explained by this changelog |
+| **Developer build (historical snapshot)** | offline suite + harness + no unexplained changes | **HISTORICAL ONLY.** An older 93-test tree passed twice with `harness.py --check` exit 0; it is not clearance for the current source or working tree. |
 | **Local owner beta** | P0/P1 invariants fixed · real provider smoke · local Docker live test · backup/restore test | **NOT CLEARED.** P0/P1 fixed (2 P0s, 12 P1s, plus `U1`, `U2`, `U10`) and backup/restore tested — but **no real provider has ever been called** and **Docker has never been exercised**. Two of four |
 | **Private cloud beta** | authentication, RBAC, TLS, secret manager, worker isolation, transactional state, live cost breakers, audit-by-user | **NOT CLEARED.** RBAC and audit-by-user now exist and are enforced on every path (`test_rbac.py`); cost breakers exist and are tested offline. **Authentication is a bearer token over plain HTTP**, there is no secret manager, state is files rather than transactions, and worker isolation is a record rather than a container |
 | **Organization pilot** | tenant isolation, edge-worker policy, MCP integrations, SLO telemetry, incident rollback, 24/7 endurance | **NOT CLEARED.** None of these exist. `workers.py` models the policy; nothing enforces it on a real machine |

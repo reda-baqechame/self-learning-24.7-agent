@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""External ComputerBench acceptance contract and development qualification.
+"""Bounded ComputerBench development qualification.
 
-This module does not supply an acceptance pack or claim that repository-authored
-fixtures are independent. Acceptance requires separately supplied, sealed pack
-and result bytes authenticated by owner trust outside the repository.
+This candidate module runs only the known synthetic development contract.
+Independent acceptance is performed solely by the separately installed,
+root-managed computerbench_verifier component. This candidate cannot issue
+acceptance challenges or return acceptance_complete=true.
 """
 import argparse
 import hashlib
-import hmac
 import json
-import math
 import os
 from pathlib import Path
-import re
 import shutil
 import stat
 import tempfile
@@ -22,8 +20,6 @@ import time
 TRACKS = ("browser_only", "native_desktop", "api_assisted")
 VARIANT_DIMENSIONS = ("layout", "wording", "timing", "authentication",
                       "multistep")
-_HEX = re.compile(r"[0-9a-f]{64}")
-_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 _MAX_DOCUMENT = 10_000_000
 
 PLAYWRIGHT_IMAGE = ("mcr.microsoft.com/playwright/mcp@sha256:"
@@ -48,7 +44,7 @@ DEVELOPMENT_EXPECTED = {
 
 
 class ContractError(ValueError):
-    """The supplied artifact cannot satisfy the acceptance contract."""
+    """The development evidence cannot satisfy its declared contract."""
 
 
 def _canonical(value):
@@ -56,307 +52,7 @@ def _canonical(value):
         return json.dumps(value, sort_keys=True, separators=(",", ":"),
                           ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as error:
-        raise ContractError("contract is not canonical JSON") from error
-
-
-def _exact(value, keys, label):
-    if not isinstance(value, dict) or set(value) != set(keys):
-        raise ContractError(label + " has an invalid shape")
-
-
-def _name(value, label):
-    if not isinstance(value, str) or not _NAME.fullmatch(value):
-        raise ContractError(label + " is invalid")
-
-
-def _digest(value, label):
-    if not isinstance(value, str) or not _HEX.fullmatch(value):
-        raise ContractError(label + " must be a lowercase SHA-256")
-
-
-def _positive_number(value, label, allow_zero=False):
-    if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not math.isfinite(value) or value < 0
-            or (not allow_zero and value == 0)):
-        raise ContractError(label + " must be a bounded number")
-
-
-def validate_pack(pack):
-    """Validate schema and frozen dimensions; return the same JSON value."""
-    _exact(pack, ("schema", "pack_id", "frozen", "cases"), "pack")
-    if pack["schema"] != "computerbench.acceptance-pack.v1":
-        raise ContractError("unsupported acceptance-pack schema")
-    _name(pack["pack_id"], "pack_id")
-    frozen = pack["frozen"]
-    _exact(frozen, ("model", "tool", "policy", "budget", "retries",
-                    "human_help"), "frozen settings")
-    _exact(frozen["model"], ("provider", "name", "version"), "model")
-    for field in ("provider", "name", "version"):
-        _name(frozen["model"][field], "model." + field)
-    _exact(frozen["tool"], ("name", "version", "sha256"), "tool")
-    _name(frozen["tool"]["name"], "tool.name")
-    _name(frozen["tool"]["version"], "tool.version")
-    _digest(frozen["tool"]["sha256"], "tool.sha256")
-    _exact(frozen["policy"], ("revision", "sha256"), "policy")
-    _name(frozen["policy"]["revision"], "policy.revision")
-    _digest(frozen["policy"]["sha256"], "policy.sha256")
-    _exact(frozen["budget"], ("max_steps", "max_seconds", "max_cost_usd"),
-           "budget")
-    if (type(frozen["budget"]["max_steps"]) is not int
-            or not 1 <= frozen["budget"]["max_steps"] <= 100_000):
-        raise ContractError("budget.max_steps is invalid")
-    _positive_number(frozen["budget"]["max_seconds"], "budget.max_seconds")
-    _positive_number(frozen["budget"]["max_cost_usd"],
-                     "budget.max_cost_usd", allow_zero=True)
-    if (type(frozen["retries"]) is not int
-            or not 0 <= frozen["retries"] <= 100):
-        raise ContractError("retries is invalid")
-    if frozen["human_help"] not in ("none", "allowed", "required"):
-        raise ContractError("human_help is invalid")
-
-    cases = pack["cases"]
-    if not isinstance(cases, list) or not 3 <= len(cases) <= 10_000:
-        raise ContractError("pack cases are missing or unbounded")
-    identities = set()
-    seen_tracks = set()
-    for case in cases:
-        _exact(case, ("id", "track", "variants", "acceptance"), "case")
-        _name(case["id"], "case.id")
-        if case["id"] in identities:
-            raise ContractError("duplicate case identity")
-        identities.add(case["id"])
-        if case["track"] not in TRACKS:
-            raise ContractError("case track is not independently labelled")
-        seen_tracks.add(case["track"])
-        _exact(case["variants"], VARIANT_DIMENSIONS, "case variants")
-        for field in VARIANT_DIMENSIONS:
-            value = case["variants"][field]
-            if not isinstance(value, str) or not value.strip() or len(value) > 500:
-                raise ContractError("case variant " + field + " is invalid")
-        _exact(case["acceptance"], ("kind", "contract"), "case acceptance")
-        _name(case["acceptance"]["kind"], "acceptance.kind")
-        value = case["acceptance"]["contract"]
-        if not isinstance(value, str) or not value.strip() or len(value) > 2_000:
-            raise ContractError("acceptance.contract is invalid")
-    if seen_tracks != set(TRACKS):
-        raise ContractError("browser, native desktop and API-assisted tracks are required")
-    _canonical(pack)
-    return pack
-
-
-def validate_results(results, pack, pack_sha256):
-    """Validate external result rows against every frozen pack field."""
-    _exact(results, ("schema", "pack_sha256", "run_id", "frozen", "cases"),
-           "results")
-    if results["schema"] != "computerbench.acceptance-results.v1":
-        raise ContractError("unsupported acceptance-results schema")
-    _digest(results["pack_sha256"], "results.pack_sha256")
-    if results["pack_sha256"] != pack_sha256:
-        raise ContractError("results are not bound to these pack bytes")
-    _name(results["run_id"], "results.run_id")
-    if results["frozen"] != pack["frozen"]:
-        raise ContractError("result settings differ from the frozen pack")
-    expected = {case["id"]: case for case in pack["cases"]}
-    rows = results["cases"]
-    if not isinstance(rows, list) or len(rows) != len(expected):
-        raise ContractError("results do not cover every pack case exactly once")
-    seen = set()
-    total_steps = 0
-    total_seconds = 0.0
-    total_cost = 0.0
-    for row in rows:
-        _exact(row, ("id", "track", "outcome", "evidence_sha256",
-                     "attempts", "human_help_used", "steps", "seconds",
-                     "cost_usd"),
-               "result row")
-        identity = row["id"]
-        if identity not in expected or identity in seen:
-            raise ContractError("unknown or duplicate result case")
-        seen.add(identity)
-        if row["track"] != expected[identity]["track"]:
-            raise ContractError("result track differs from the pack")
-        if row["outcome"] not in ("passed", "failed", "skipped"):
-            raise ContractError("result outcome is invalid")
-        _digest(row["evidence_sha256"], "result evidence")
-        if (type(row["attempts"]) is not int or row["attempts"] < 1
-                or row["attempts"] > 1 + pack["frozen"]["retries"]):
-            raise ContractError("result attempts exceed the frozen retry setting")
-        if type(row["human_help_used"]) is not bool:
-            raise ContractError("human_help_used must be boolean")
-        if pack["frozen"]["human_help"] == "none" and row["human_help_used"]:
-            raise ContractError("result used human help despite the frozen setting")
-        if type(row["steps"]) is not int or row["steps"] < 0:
-            raise ContractError("result steps must be a non-negative integer")
-        _positive_number(row["seconds"], "result seconds", allow_zero=True)
-        _positive_number(row["cost_usd"], "result cost", allow_zero=True)
-        total_steps += row["steps"]
-        total_seconds += row["seconds"]
-        total_cost += row["cost_usd"]
-    budget = pack["frozen"]["budget"]
-    if (total_steps > budget["max_steps"]
-            or total_seconds > budget["max_seconds"]
-            or total_cost > budget["max_cost_usd"]):
-        raise ContractError("results exceed the frozen step, time or cost budget")
-    return results
-
-
-def _path(path, label):
-    if path is None:
-        raise ContractError(label + " is missing")
-    candidate = os.path.realpath(os.fspath(path))
-    try:
-        info = os.lstat(candidate)
-    except OSError as error:
-        raise ContractError(label + " is unavailable") from error
-    if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-            or info.st_nlink != 1 or not 0 < info.st_size <= _MAX_DOCUMENT
-            or getattr(info, "st_file_attributes", 0) & 0x400):
-        raise ContractError(label + " must be one bounded unlinked regular file")
-    return candidate
-
-
-def _outside(path, repository_root):
-    repo = os.path.normcase(os.path.realpath(os.fspath(repository_root)))
-    candidate = os.path.normcase(os.path.realpath(path))
-    try:
-        return os.path.commonpath((repo, candidate)) != repo
-    except ValueError:
-        return True
-
-
-def _bytes(path):
-    with open(path, "rb") as stream:
-        before = os.fstat(stream.fileno())
-        raw = stream.read(_MAX_DOCUMENT + 1)
-        after = os.fstat(stream.fileno())
-    if len(raw) > _MAX_DOCUMENT or (before.st_dev, before.st_ino,
-            before.st_size, before.st_nlink) != (after.st_dev, after.st_ino,
-            after.st_size, after.st_nlink):
-        raise ContractError("external artifact changed during read")
-    return raw
-
-
-def _json(raw, label):
-    try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, ValueError) as error:
-        raise ContractError(label + " is not valid UTF-8 JSON") from error
-    if not isinstance(value, dict):
-        raise ContractError(label + " must be a JSON object")
-    return value
-
-
-def _trust(path, repository_root):
-    path = _path(path, "independent owner trust")
-    if not _outside(path, repository_root):
-        raise ContractError("independent owner trust is inside the repository")
-    value = _json(_bytes(path), "independent owner trust")
-    _exact(value, ("schema", "authority_id", "scope", "key_hex"),
-           "independent owner trust")
-    if value["schema"] != "computerbench.owner-trust.v1" \
-            or value["scope"] != "computerbench":
-        raise ContractError("independent owner trust scope is invalid")
-    _name(value["authority_id"], "owner authority")
-    if (not isinstance(value["key_hex"], str)
-            or not re.fullmatch(r"[0-9a-f]{64}", value["key_hex"])):
-        raise ContractError("independent owner trust key is invalid")
-    return value, bytes.fromhex(value["key_hex"])
-
-
-def _sealed(artifact_path, seal_path, trust, key, repository_root, kind):
-    artifact_path = _path(artifact_path, kind)
-    seal_path = _path(seal_path, kind + " seal")
-    if not _outside(artifact_path, repository_root):
-        raise ContractError(kind + " is inside the repository")
-    if not _outside(seal_path, repository_root):
-        raise ContractError(kind + " seal is inside the repository")
-    raw = _bytes(artifact_path)
-    seal = _json(_bytes(seal_path), kind + " seal")
-    _exact(seal, ("schema", "artifact_kind", "authority_id", "sha256",
-                  "hmac_sha256"), kind + " seal")
-    if seal["schema"] != "computerbench.seal.v1" \
-            or seal["artifact_kind"] != kind \
-            or seal["authority_id"] != trust["authority_id"]:
-        raise ContractError(kind + " seal identity is invalid")
-    _digest(seal["sha256"], kind + " seal digest")
-    _digest(seal["hmac_sha256"], kind + " seal MAC")
-    if not hmac.compare_digest(seal["sha256"], hashlib.sha256(raw).hexdigest()):
-        raise ContractError(kind + " content seal differs")
-    body = {name: seal[name] for name in seal if name != "hmac_sha256"}
-    expected = hmac.new(key, _canonical(body), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(seal["hmac_sha256"], expected):
-        raise ContractError(kind + " owner authentication differs")
-    return _json(raw, kind), seal["sha256"]
-
-
-def _matrix(pack=None, results=None):
-    matrix = {}
-    for track in TRACKS:
-        cases = [case for case in (pack or {}).get("cases", [])
-                 if case.get("track") == track]
-        rows = [row for row in (results or {}).get("cases", [])
-                if row.get("track") == track]
-        matrix[track] = {"declared_cases": len(cases),
-                         "reported_cases": len(rows),
-                         "passed": sum(row.get("outcome") == "passed"
-                                       for row in rows),
-                         "failed": sum(row.get("outcome") == "failed"
-                                       for row in rows),
-                         "skipped": sum(row.get("outcome") == "skipped"
-                                        for row in rows),
-                         "accepted": bool(cases and len(rows) == len(cases)
-                                          and all(row.get("outcome") == "passed"
-                                                  for row in rows))}
-    return matrix
-
-
-def assess_acceptance(pack_path=None, seal_path=None, trust_path=None,
-                      results_path=None, results_seal_path=None,
-                      repository_root=None):
-    """Assess externally supplied bytes; never infer provenance from prose."""
-    repository_root = repository_root or Path(__file__).resolve().parent
-    report = {"contract_valid": False, "provenance_bound": False,
-              "results_valid": False, "acceptance_complete": False,
-              "release_ready": False, "missing_evidence": [],
-              "capability_matrix": _matrix(),
-              "scope": "external acceptance contract; not release qualification"}
-    try:
-        owner, key = _trust(trust_path, repository_root)
-    except ContractError:
-        report["missing_evidence"].append("independent_owner_trust")
-        return report
-    try:
-        value, digest = _sealed(pack_path, seal_path, owner, key,
-                                repository_root, "acceptance_pack")
-    except ContractError as error:
-        message = str(error)
-        report["missing_evidence"].append(
-            "pack_inside_repository" if "inside the repository" in message
-            and "acceptance_pack is" in message else "pack_content_seal")
-        return report
-    report["provenance_bound"] = True
-    try:
-        pack = validate_pack(value)
-    except ContractError:
-        report["missing_evidence"].append("valid_pack_contract")
-        return report
-    report["contract_valid"] = True
-    report["capability_matrix"] = _matrix(pack)
-    try:
-        results_value, _ = _sealed(results_path, results_seal_path, owner, key,
-                                   repository_root, "acceptance_results")
-        results = validate_results(results_value, pack, digest)
-    except ContractError:
-        report["missing_evidence"].append("sealed_external_results")
-        return report
-    report["results_valid"] = True
-    report["capability_matrix"] = _matrix(pack, results)
-    report["acceptance_complete"] = all(
-        row["accepted"] for row in report["capability_matrix"].values())
-    # Independent acceptance is one gate, not release. Live model/provider,
-    # native platform matrix, soak, rollback and review remain separate.
-    report["release_ready"] = False
-    return report
+        raise ContractError("development contract is not canonical JSON") from error
 
 
 def invoice_manifest():
@@ -379,8 +75,10 @@ def portal_spec(docker, output_dir):
     digest = PLAYWRIGHT_IMAGE.split("@sha256:", 1)[1]
     command = ("node /fixture/server.cjs & ready=; "
                "for attempt in $(seq 1 100); do "
-               "node -e \"fetch('http://127.0.0.1:8765/health').then(r=>"
-               "process.exit(r.ok?0:1)).catch(()=>process.exit(1))\" "
+               "node -e \"fetch('http://127.0.0.1:8765/health',"
+               "{signal:AbortSignal.timeout(250)}).then(r=>"
+               "process.exit(r.ok?0:1))"
+               ".catch(()=>process.exit(1))\" "
                "&& { ready=1; break; }; sleep 0.02; done; "
                "[ \"$ready\" = 1 ] || exit 70; "
                "exec node /app/cli.js --headless "
@@ -581,25 +279,39 @@ def _artifact_manifest(output):
 
 
 def _development_status(record):
-    if (record.get("trial_error") or not record.get("cleanup", {}).get("confirmed")
+    if not isinstance(record, dict):
+        return "unresolved"
+    cleanup = record.get("cleanup")
+    if (record.get("trial_error") or not isinstance(cleanup, dict)
+            or cleanup.get("confirmed") is not True
             or record.get("artifact_outcome") not in ("verified", "rejected")):
         return "unresolved"
+    if "action_read_error" in record:
+        return "unresolved"
+    actions = record.get("actions")
+    attempted = record.get("action_attempted")
+    if (type(attempted) is not bool or not isinstance(actions, list)
+            or any(not isinstance(action, dict)
+                   or action.get("state") not in ("VERIFIED", "REFUSED")
+                   for action in actions)
+            or (attempted and not actions) or (not attempted and actions)):
+        return "unresolved"
+    outcome = record.get("controller_outcome")
+    if (outcome not in ("completed", "refused")
+            or (outcome == "completed"
+                and (not attempted
+                     or not any(action["state"] == "VERIFIED"
+                                for action in actions)))
+            or (outcome == "refused"
+                and any(action["state"] != "REFUSED" for action in actions))):
+        return "unresolved"
     if record["artifact_outcome"] == "verified":
-        if record.get("controller_outcome") == "completed":
+        if outcome == "completed":
             return "verified_completion"
         return "unresolved"
-    case = record["case"]
-    outcome = record.get("controller_outcome")
-    if (outcome == "completed"
-            and case in ("corrupt", "duplicate_missing")):
+    if outcome == "completed":
         return "rejected_artifacts"
-    if outcome == "unknown" and case == "interrupted":
-        return "rejected_artifacts"
-    if (outcome == "refused"
-            and case in ("ambiguous", "dialog", "expired", "restart",
-                         "cross_origin")):
-        return "safe_refusal"
-    if outcome == "unknown" and case == "cross_origin":
+    if outcome == "refused":
         return "safe_refusal"
     return "unresolved"
 
@@ -629,6 +341,7 @@ def run_development_trial(case, repeat, trial_root, docker):
               "expected": DEVELOPMENT_EXPECTED[case],
               "status": "unresolved", "controller_outcome": "not_started",
               "artifact_outcome": "not_run", "provider_calls": 0,
+              "action_attempted": False,
               "receipts": [], "timing": [], "environments": [],
               "acceptance_complete": False, "release_ready": False,
               "scope": "known deterministic synthetic development fixture",
@@ -669,6 +382,7 @@ def run_development_trial(case, repeat, trial_root, docker):
                 record.setdefault("isolation_after_restart", []).append(
                     _inspect_environment(root, environment))
             try:
+                record["action_attempted"] = True
                 _timed(record, "old_receipt_after_restart",
                        lambda: current.click(old, "INV-0"))
                 raise RuntimeError("old session receipt authorized after restart")
@@ -687,6 +401,7 @@ def run_development_trial(case, repeat, trial_root, docker):
                 state = receipt["state"]
             if state["dialog"] or state["expired"]:
                 if state["links"]:
+                    record["action_attempted"] = True
                     _timed(record, "blocked_click",
                            lambda: current.click(receipt, state["links"][0]["id"]))
                 raise computeruse.Refused("dialog or authentication state blocked retrieval")
@@ -698,6 +413,7 @@ def run_development_trial(case, repeat, trial_root, docker):
                 record["moved_state_changed"] = receipt_state_changed(old, receipt)
                 if record["moved_state_changed"]:
                     try:
+                        record["action_attempted"] = True
                         _timed(record, "stale_moved_click",
                                lambda: current.click(old, "INV-0"))
                         raise RuntimeError("moved target accepted without re-observation")
@@ -707,6 +423,7 @@ def run_development_trial(case, repeat, trial_root, docker):
                     record["moved_receipt_refused"] = (
                         "not exercised: movement preceded the first sealed receipt")
             for link in list(receipt["state"]["links"]):
+                record["action_attempted"] = True
                 fresh = _remember_receipt(record, "pre-click-" + link["id"],
                                           _timed(record, "observe", current.observe))
                 clicked = _timed(record, "click-" + link["id"],
@@ -753,7 +470,7 @@ def run_development_trial(case, repeat, trial_root, docker):
     try:
         record["actions"] = (current.actions() if current is not None else [])
     except BaseException as error:
-        record["actions"] = []
+        record["actions"] = None
         record["action_read_error"] = str(error)[:300]
 
     expected = invoice_manifest()
@@ -786,9 +503,16 @@ def summarize_development(rows):
     action_states = {}
     for row in rows:
         statuses[row["status"]] = statuses.get(row["status"], 0) + 1
-        for action in row.get("actions", []):
-            state = action.get("state", "missing")
+        actions = row.get("actions")
+        for action in actions if isinstance(actions, list) else []:
+            state = action.get("state", "missing") if isinstance(action, dict) \
+                else "malformed"
             action_states[state] = action_states.get(state, 0) + 1
+    selection_complete = bool(rows) and all(
+        row.get("development_expectation_met")
+        and row.get("cleanup", {}).get("confirmed")
+        and row.get("status") != "unresolved"
+        and _development_status(row) == row.get("status") for row in rows)
     return {"trials": len(rows), "expectations_met": sum(
                 bool(row.get("development_expectation_met")) for row in rows),
             "statuses": statuses,
@@ -801,10 +525,8 @@ def summarize_development(rows):
             "cleanup_confirmed": sum(bool(row.get("cleanup", {}).get("confirmed"))
                                      for row in rows),
             "durable_action_states": action_states,
-            "development_complete": len(rows) == 36
-                                    and all(row.get("development_expectation_met")
-                                            and row.get("cleanup", {}).get("confirmed")
-                                            for row in rows),
+            "selection_complete": selection_complete,
+            "development_complete": len(rows) == 36 and selection_complete,
             "acceptance_complete": False, "release_ready": False,
             "provider_calls": sum(row.get("provider_calls", 0) for row in rows),
             "scope": "known deterministic development fixtures; not independent acceptance"}
@@ -843,16 +565,12 @@ def run_development(run_dir, docker=None, cases=None, repeats=3):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Computer-use qualification contracts")
+    parser = argparse.ArgumentParser(
+        description="Computer-use development qualification")
     commands = parser.add_subparsers(dest="command", required=True)
-    acceptance = commands.add_parser("acceptance")
-    acceptance.add_argument("--pack")
-    acceptance.add_argument("--pack-seal")
-    acceptance.add_argument("--owner-trust")
-    acceptance.add_argument("--results")
-    acceptance.add_argument("--results-seal")
-    acceptance.add_argument("--repository-root",
-                            default=str(Path(__file__).resolve().parent))
+    commands.add_parser(
+        "acceptance",
+        help="fail closed; use the separately installed external verifier")
     development = commands.add_parser("development")
     development.add_argument("--opt-in", action="store_true", required=True)
     development.add_argument("--run-dir", required=True)
@@ -860,16 +578,23 @@ def main(argv=None):
     development.add_argument("--case", choices=tuple(DEVELOPMENT_EXPECTED))
     development.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args(argv)
-    if args.command == "development":
-        report = run_development(args.run_dir, args.docker,
-                                 [args.case] if args.case else None,
-                                 args.repeats)
+    if args.command == "acceptance":
+        report = {
+            "acceptance_complete": False,
+            "release_ready": False,
+            "missing_evidence": ["external_verifier_required"],
+            "scope": ("candidate development CLI cannot verify acceptance; "
+                      "use the fixed root-installed external verifier"),
+        }
         print(json.dumps(report, indent=2, sort_keys=True))
-        return 0 if report["development_complete"] or args.case else 2
-    report = assess_acceptance(args.pack, args.pack_seal, args.owner_trust,
-                               args.results, args.results_seal, args.repository_root)
+        return 2
+    report = run_development(args.run_dir, args.docker,
+                             [args.case] if args.case else None,
+                             args.repeats)
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if report["contract_valid"] else 2
+    complete = (report.get("selection_complete") if args.case
+                else report.get("development_complete"))
+    return 0 if complete is True else 2
 
 
 if __name__ == "__main__":

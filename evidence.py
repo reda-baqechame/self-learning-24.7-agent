@@ -354,7 +354,7 @@ def run_suite(capture_path=None):
     construction, and a crashed test still gets its own section.
     """
     tests = registered_tests()
-    parts, failed = [], 0
+    parts, failed, skipped = [], [], []
     tdir = os.path.join(HERE, "tests")
     for name in tests:
         parts.append(f"=== {name} ===")
@@ -370,27 +370,125 @@ def run_suite(capture_path=None):
         # prints, on every platform.
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         r = subprocess.run([sys.executable, os.path.join(tdir, name)],
-                           capture_output=True, text=True, cwd=tdir,
-                           encoding="utf-8", errors="replace", env=env)
-        parts.append((r.stdout or "") + (r.stderr or ""))
+                           capture_output=True, text=False, cwd=tdir,
+                           env=env)
+        child = _sanitize_child_output((r.stdout or b"") +
+                                       (r.stderr or b""))
+        parts.append(child)
         if r.returncode != 0:
-            failed += 1
+            failed.append(name)
             parts.append(f"[FAILED] exit {r.returncode}")
+        else:
+            skip = re.search(rf"^SKIP\s+{re.escape(name[:-3])}\b\s*:?\s*(.*)$",
+                             child, re.M)
+            if skip:
+                skipped.append({"name": name,
+                                "reason": skip.group(1).strip()
+                                          or "no reason given"})
         print(f"  {'ok  ' if r.returncode == 0 else 'FAIL'} {name}", flush=True)
+    terminal = {"schema": "run_all.terminal.v1", "tests": tests,
+                "executed": len(tests),
+                "passed": len(tests) - len(failed) - len(skipped),
+                "skipped": skipped, "failed": failed}
+    parts.append("RUN_ALL_RECORD " + json.dumps(
+        terminal, sort_keys=True, separators=(",", ":")))
     out = "\n".join(parts)
     if capture_path:
         with open(capture_path, "w", encoding="utf-8") as f:
             f.write(out)
-    return out, failed
+    return out, len(failed)
 
 
-FAILED_LINE_RE = re.compile(r"^FAILED:\s*(.+?)\s*$")
 FAILED_NAME_RE = re.compile(r"test_\w+\.py")
-RUNALL_TAIL_RE = re.compile(r"^(\d+) executed: (\d+) passed, (\d+) skipped, "
-                            r"(\d+) failed(?:\s|$)")
+RUNNER_PREFIX = "RUN_ALL_RECORD "
 
 
-def parse(output):
+def _decode_evidence_bytes(raw):
+    """Never destroy bytes with U+FFFD; escape undecodable UTF-8 visibly."""
+    return raw.decode("utf-8", errors="backslashreplace")
+
+
+def _parent_framing_candidate(line):
+    """Strip every edge character this parser ignores around test headers."""
+    start, end = 0, len(line)
+    while start < end:
+        character = line[start]
+        if not (character.isspace() or ord(character) < 32
+                or ord(character) == 127):
+            break
+        start += 1
+    while end > start:
+        character = line[end - 1]
+        if not (character.isspace() or ord(character) < 32
+                or ord(character) == 127):
+            break
+        end -= 1
+    return line[start:end]
+
+
+def _sanitize_child_output(raw):
+    decoded = _decode_evidence_bytes(raw)
+    safe = []
+    for line in decoded.splitlines():
+        normalized = _parent_framing_candidate(line)
+        if (normalized.startswith(RUNNER_PREFIX)
+                or TEST_RE.fullmatch(normalized)):
+            safe.append("CHILD_ESCAPED " + line.encode(
+                "unicode_escape").decode("ascii"))
+        else:
+            safe.append(line)
+    return "\n".join(safe) + ("\n" if decoded.endswith(("\r", "\n")) else "")
+
+
+def _runner_record(lines):
+    located = [(index, line[len(RUNNER_PREFIX):])
+               for index, line in enumerate(lines)
+               if line.startswith(RUNNER_PREFIX)]
+    if len(located) != 1:
+        raise ValueError("exactly one terminal runner record is required")
+    index, raw = located[0]
+    last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
+    if index != last:
+        raise ValueError("terminal runner record must be the last nonempty line")
+    try:
+        record = json.loads(raw)
+    except ValueError as error:
+        raise ValueError("terminal runner record is truncated or invalid") from error
+    keys = {"schema", "tests", "executed", "passed", "skipped", "failed"}
+    if not isinstance(record, dict) or set(record) != keys \
+            or record.get("schema") != "run_all.terminal.v1":
+        raise ValueError("terminal runner record shape is invalid")
+    tests = record["tests"]
+    failed = record["failed"]
+    skips = record["skipped"]
+    if (not isinstance(tests, list) or not tests
+            or any(not isinstance(name, str)
+                   or not FAILED_NAME_RE.fullmatch(name) for name in tests)
+            or len(tests) != len(set(tests))
+            or not isinstance(failed, list)
+            or any(name not in tests for name in failed)
+            or len(failed) != len(set(failed))
+            or not isinstance(skips, list)):
+        raise ValueError("terminal runner identities are invalid")
+    skip_map = {}
+    for row in skips:
+        if (not isinstance(row, dict) or set(row) != {"name", "reason"}
+                or row["name"] not in tests or row["name"] in skip_map
+                or not isinstance(row["reason"], str)
+                or not row["reason"].strip()):
+            raise ValueError("terminal runner skip record is invalid")
+        skip_map[row["name"]] = row["reason"].strip()
+    if set(failed) & set(skip_map):
+        raise ValueError("terminal runner outcomes overlap")
+    executed, passed = record["executed"], record["passed"]
+    if (type(executed) is not int or type(passed) is not int
+            or executed != len(tests) or passed < 0
+            or passed + len(failed) + len(skip_map) != executed):
+        raise ValueError("terminal runner counts are inconsistent")
+    return record, skip_map
+
+
+def parse(output, _expected_tests=None):
     """-> {test file: {"sections": [...], "passed": bool}}
 
     A `--from` log produced by run_all.py under ONE pipe is exactly the
@@ -401,36 +499,29 @@ def parse(output):
     the inverse of the UNITTEST_OK_RE bug, and just as corrosive: a report
     that can cry wolf teaches its reader to ignore wolves.
 
-    run_all's tail is authoritative — it counts EXIT CODES and names every
-    failed file in a `FAILED: <name>` line. So when that tail is present,
+    run_all's last machine record is authoritative — it counts EXIT CODES,
+    names every failed/skipped file and pins section order. So when present,
     a test with no recognized pass marker and no skip is failed ONLY if
     the tail names it; otherwise its verdict is the exit code's (passed)
     and only its observations are lost to the interleaving, which the
     report can afford — verdicts cannot."""
-    per, current = {}, None
-    named_failed, footer = set(), None
-    for line in output.splitlines():
+    lines = output.splitlines()
+    record, skip_map = _runner_record(lines)
+    expected_tests = (registered_tests() if _expected_tests is None
+                      else list(_expected_tests))
+    if record["tests"] != expected_tests:
+        raise ValueError("terminal runner test registry or order differs")
+    per, current, section_order = {}, None, []
+    for line in lines:
         line = line.strip()
+        if line.startswith(RUNNER_PREFIX):
+            continue
         m = TEST_RE.match(line)
         if m:
             current = m.group(1)
+            section_order.append(current)
             per.setdefault(current, {"sections": [], "passed": False,
                                      "skipped": None})
-            continue
-        m = FAILED_LINE_RE.match(line)
-        if m:
-            names = [part.strip() for part in m.group(1).split(",")]
-            if (not names or any(not FAILED_NAME_RE.fullmatch(name)
-                                 for name in names)):
-                raise ValueError("invalid authoritative FAILED file list")
-            named_failed.update(names)
-            continue
-        m = RUNALL_TAIL_RE.match(line)
-        if m:
-            found = tuple(int(value) for value in m.groups())
-            if footer is not None and footer != found:
-                raise ValueError("conflicting authoritative footer totals")
-            footer = found
             continue
         if current is None:
             continue
@@ -445,34 +536,17 @@ def parse(output):
         if m:
             per[current]["skipped"] = m.group(2).strip() or "no reason given"
             per[current]["passed"] = False
-    if footer is not None:
-        for name, rec in per.items():
-            if not rec["passed"] and not rec["skipped"] \
-                    and name not in named_failed:
-                rec["passed"] = True
-        # the authority cuts BOTH ways: a test the tail names failed is
-        # failed, however green a stray PASS line inside its section looks
-        # (a test can print PASS and then die in teardown — the exit code
-        # saw it, the prose did not)
-        for name in named_failed:
-            if name in per:
-                per[name]["passed"] = False
-                per[name]["skipped"] = None
-        executed, passed, skipped, failed = footer
-        actual = (len(per),
-                  sum(bool(rec["passed"]) for rec in per.values()),
-                  sum(bool(rec["skipped"]) for rec in per.values()),
-                  sum(not rec["passed"] and not rec["skipped"]
-                      for rec in per.values()))
-        if (len(named_failed) != failed or
-                actual != (executed, passed, skipped, failed)):
-            raise ValueError("generated evidence totals differ from the "
-                             "authoritative footer")
+    if section_order != record["tests"] or set(per) != set(record["tests"]):
+        raise ValueError("test sections are missing, duplicated or out of order")
+    named_failed = set(record["failed"])
+    for name, rec in per.items():
+        rec["skipped"] = skip_map.get(name)
+        rec["passed"] = name not in named_failed and name not in skip_map
     return per
 
 
-def build(output):
-    per = parse(output)
+def build(output, _expected_tests=None):
+    per = parse(output, _expected_tests=_expected_tests)
     registered = registered_tests()
     mapped = {t for s in SYSTEMS.values() for t in s["tests"]}
     unclassified = [t for t in registered if t not in mapped]
@@ -590,14 +664,7 @@ def main():
         # decoded output can double-encode a few bytes), which no single codec
         # can read. Those get U+FFFD and nothing else does.
         raw = open(a.src, "rb").read()
-        for enc in ("utf-8", locale.getpreferredencoding(False), "cp1252"):
-            try:
-                output = raw.decode(enc)
-                break
-            except (UnicodeDecodeError, LookupError):
-                continue
-        else:
-            output = raw.decode("cp1252", errors="replace")
+        output = _decode_evidence_bytes(raw)
         code = 0
     else:
         print("running the suite (this takes a few minutes)...", flush=True)

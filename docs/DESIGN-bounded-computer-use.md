@@ -56,30 +56,50 @@ other agents, or a basis for claiming best-in-world computer use.
 Native desktop, real-account and live-model quality, uncertain business writes,
 comparative trials and soak/rollback release proof remain separate gates.
 
-## Task 6 development result and acceptance boundary
+## Task 6 historical result and corrected acceptance boundary
 
-The corrected deterministic run retained 36 trial receipts and produced the
-preregistered class totals: 12 `verified_completion` (normal, delayed, moved and
-injection, three each), 15 `safe_refusal` (ambiguous, dialog, expired, restart
-and cross-origin, three each) and 9 `rejected_artifacts` (interrupted, corrupt
-and duplicate/missing, three each). Cleanup was independently read back for all
-36 owned containers and no provider was called. An earlier 35/36 run is also
-retained: one moved-layout receipt arrived after movement, and the runner wrongly
-treated a legitimate fresh dispatch as a stale-receipt failure. That failed run
-was not relabelled; the runner gained a sealed-state comparison and a new full
-run used a fresh root.
+The retained 36-trial run reported 12 `verified_completion`, 15 `safe_refusal`
+and 9 `rejected_artifacts`, with 36 cleanup readbacks and no provider call. That
+receipt is historical evidence for the pre-review classifier, not corrected-tree
+clearance: case names could turn unreconciled controller/action `UNKNOWN` into a
+refusal or artifact rejection. Corrected classification makes every unreconciled
+`UNKNOWN` an `unresolved` trial even when artifacts reject, keeps artifact outcome
+separate, and does not force preregistered totals. A fresh complete batch is
+required; any unresolved or expected-class mismatch keeps `development_complete`
+false. The earlier 35/36 moved-layout failure also remains historical.
 
-These are known synthetic development fixtures. `computerbench.py` separately
-defines an external acceptance-pack contract with layout, wording, timing,
-authentication and multistep variants. The pack and results must be supplied
-separately, content-sealed and authenticated by independently supplied owner
-trust outside repository/worker-authored content. The contract freezes model,
+These are known synthetic development fixtures. Candidate `computerbench.py`
+cannot issue a challenge or verify acceptance; its acceptance command always
+exits nonzero. `computerbench_verifier.py` is only an out-of-band installation
+template for the external acceptance-pack contract. Production refuses unless
+the root-owned `computerbench-verifier` launcher starts that module from its
+exact fixed `/opt` location using fixed `/usr/bin/python3 -I -S` and an
+allowlist-only environment. The verifier source is non-executable and validates
+the exact interpreter arguments, isolated/no-site/ignore-environment flags and
+environment again; direct entry refuses. Every installation directory, launcher
+and module is root-owned/non-writable, and the process is the
+configured dedicated nonroot verifier UID distinct from the worker. It imports
+only stdlib after launcher isolation and never imports or executes a candidate
+module. Worker `PATH`, `PYTHONPATH`, user-site and `sitecustomize` code cannot
+precede validation. A fixed root-owned public store supplies separate issuer and
+evaluator RSA keys; no CLI provisions or signs. Windows and absent, aliased,
+misowned or mispermissioned authority fail closed. The candidate is the exact
+`package.py` ZIP treated solely as data. The verifier rejects traversal,
+duplicates, links and special members, and binds archive bytes, the complete
+member manifest including synthesized `.gitkeep` members, runtime/config
+digests, launcher+verifier build, trust metadata, frozen settings, issue/expiry times and
+a one-run challenge.
+Consumption locks the transition, durably creates an exclusive tombstone before
+removing issued state, and a tombstone forever dominates restored issued bytes.
+The contract freezes model,
 tool, policy, budget, retries and human help; sealed results report steps,
 elapsed time and cost and are rejected when their aggregate exceeds those
 frozen ceilings. It reports browser-only,
 native-desktop and API-assisted tracks separately. No author string or
-self-generated digest establishes independence. No real external pack/results
-were supplied in this task, therefore `acceptance_complete=false` and
+self-generated digest establishes independence. An explicitly internal temp
+backend supports public-key verification mechanics but cannot set acceptance
+true. This Windows host lacks the required POSIX verifier authority and no real external pack/
+results were supplied, therefore `acceptance_complete=false` and
 `release_ready=false`.
 
 MCP/API compatibility is not model competence. DOM observation or acknowledged

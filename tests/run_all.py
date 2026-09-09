@@ -2,11 +2,14 @@
 """Run every offline acceptance test. One command: python tests/run_all.py"""
 
 import os
+import json
 import re
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+TERMINAL_PREFIX = "RUN_ALL_RECORD "
+HEADER_RE = re.compile(r"^=== test_\w+\.py ===$")
 TESTS = ["test_resume.py", "test_lock.py", "test_json_toolcall.py",
          "test_reflector.py", "test_compaction.py", "test_verify.py",
          "test_inbox.py", "test_skills.py", "test_course.py",
@@ -68,6 +71,44 @@ TESTS = ["test_resume.py", "test_lock.py", "test_json_toolcall.py",
          "test_twin.py", "test_twin_measurement.py", "test_computeruse.py", "test_computeruse_live.py", "test_computer_session.py", "test_computerbench.py"]
 
 
+def decode_child_output(raw):
+    """Decode losslessly: invalid child bytes become visible escapes."""
+    return (raw or b"").decode("utf-8", errors="backslashreplace")
+
+
+def parent_framing_candidate(line):
+    """Strip every edge character the evidence parser ignores around headers."""
+    start, end = 0, len(line)
+    while start < end:
+        character = line[start]
+        if not (character.isspace() or ord(character) < 32
+                or ord(character) == 127):
+            break
+        start += 1
+    while end > start:
+        character = line[end - 1]
+        if not (character.isspace() or ord(character) < 32
+                or ord(character) == 127):
+            break
+        end -= 1
+    return line[start:end]
+
+
+def sanitize_child_output(raw):
+    """Prevent child-controlled bytes from impersonating parent framing."""
+    decoded = decode_child_output(raw)
+    safe = []
+    for line in decoded.splitlines():
+        normalized = parent_framing_candidate(line)
+        if (normalized.startswith(TERMINAL_PREFIX)
+                or HEADER_RE.fullmatch(normalized)):
+            safe.append("CHILD_ESCAPED " + line.encode(
+                "unicode_escape").decode("ascii"))
+        else:
+            safe.append(line)
+    return "\n".join(safe) + ("\n" if decoded.endswith(("\r", "\n")) else "")
+
+
 def main():
     # EXPLICIT COUNTS, NEVER ONE GREEN PHRASE. This used to end "ALL TESTS
     # PASSED", which the audit called out precisely: test_shutdown SKIPS on
@@ -87,20 +128,27 @@ def main():
         # prints becomes U+FFFD in the relayed output.
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         r = subprocess.run([sys.executable, os.path.join(HERE, t)], cwd=HERE,
-                           capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", env=env)
-        sys.stdout.write(r.stdout or "")
-        sys.stderr.write(r.stderr or "")
+                           capture_output=True, text=False, env=env)
+        stdout = sanitize_child_output(r.stdout)
+        stderr = sanitize_child_output(r.stderr)
+        sys.stdout.write(stdout)
+        sys.stderr.write(stderr)
         sys.stdout.flush()
-        out = (r.stdout or "") + (r.stderr or "")
+        out = stdout + stderr
         if r.returncode != 0:
             failed.append(t)
-        elif re.search(rf"^SKIP\s+{re.escape(t[:-3])}\b", out, re.M):
-            skipped.append(t)
+        else:
+            skip = re.search(rf"^SKIP\s+{re.escape(t[:-3])}\b\s*:?\s*(.*)$",
+                             out, re.M)
+            if skip:
+                skipped.append({"name": t,
+                                "reason": skip.group(1).strip()
+                                          or "no reason given"})
     passed = len(TESTS) - len(failed) - len(skipped)
     print(f"\n{len(TESTS)} executed: {passed} passed, "
           f"{len(skipped)} skipped, {len(failed)} failed"
-          + (f"  [skipped: {', '.join(skipped)}]" if skipped else ""))
+          + (f"  [skipped: {', '.join(row['name'] for row in skipped)}]"
+             if skipped else ""))
     if failed:
         print("FAILED: " + ", ".join(failed))
     elif not skipped:
@@ -109,6 +157,11 @@ def main():
         print("ALL EXECUTED TESTS PASSED — the skipped ones proved nothing "
               "here; their reasons are printed above and counted in "
               "EVIDENCE.md")
+    terminal = {"schema": "run_all.terminal.v1", "tests": TESTS,
+                "executed": len(TESTS), "passed": passed,
+                "skipped": skipped, "failed": failed}
+    print(TERMINAL_PREFIX + json.dumps(
+        terminal, sort_keys=True, separators=(",", ":")), flush=True)
     sys.exit(1 if failed else 0)
 
 

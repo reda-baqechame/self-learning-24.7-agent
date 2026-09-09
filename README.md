@@ -1,10 +1,12 @@
 # Expert Fleet
 
-> This branch is a bounded computer-use development candidate. Its 36 retained
-> deterministic portal trials ran through the task-owned `ComputerSession` and
-> produced the preregistered 12 verified completions, 15 safe refusals and 9
-> rejected artifact sets with 36 confirmed cleanups. That is development-fixture
-> coverage, not independent acceptance, model competence or release readiness.
+> This branch is a bounded computer-use development candidate. The retained
+> 36-trial 12/15/9 result is historical evidence for the pre-review classifier,
+> which incorrectly let case names launder unreconciled `UNKNOWN` actions. It is
+> not current-source qualification. A fresh batch must report measured classes
+> without forcing old totals, and any unresolved trial keeps development
+> incomplete. This remains development-fixture coverage, not independent
+> acceptance, model competence or release readiness.
 > See [the phase contract](docs/DESIGN-bounded-computer-use.md).
 
 The bounded invoice click adapter now uses Playwright locator actionability.
@@ -59,12 +61,24 @@ The additional local session test includes real child/grandchild termination and
 with `AGENT_COMPUTER_LIVE=1`, a pinned Chromium session/container cleanup check.
 These tests do not establish cross-OS qualification or general network containment.
 
-`computerbench.py` also defines a separately supplied external acceptance-pack
-contract. It requires a content seal authenticated by independently supplied
-owner trust outside the repository, freezes model/tool/policy/budget/retries and
-human help, rejects results that exceed frozen aggregate step/time/cost ceilings,
-and reports browser-only, native-desktop and API-assisted tracks separately. No
-such external pack or results were supplied here, so
+`computerbench.py` is development-only and its `acceptance` command always
+fails closed. Production challenge and acceptance are owned by the separate
+`computerbench_verifier.py` installation template. An OS administrator must
+install that verifier at its fixed `/opt` path, root-owned and non-writable,
+with the shipped root-owned `computerbench-verifier` launcher. Only that launcher
+is executable: it uses fixed `/usr/bin/python3 -I -S` under an empty, allowlisted
+environment, while the verifier source itself is non-executable and refuses a
+direct or non-isolated entry. This prevents worker `PATH`, `PYTHONPATH`, user-site
+and `sitecustomize` code from running before verifier validation. A fixed
+root-owned public trust store and verifier-owned challenge state accompany it;
+it runs under a dedicated nonroot verifier UID distinct from the worker.
+The verifier accepts an inert `package.py` ZIP, never imports or executes its
+code, and binds its exact archive bytes, safely parsed member manifest (including
+synthesized `.gitkeep` members), runtime/config digests, verifier build, public
+trust metadata, frozen settings and durable one-run challenge. Distinct issuer
+and evaluator RSA public keys verify the external pack and results. The shipped
+template is not installed authority, its internal fixture cannot set acceptance
+true, Windows fails closed, and no external pack/results exist, so
 `acceptance_complete=false` and `release_ready=false`. DOM observation and input
 dispatch are not business success. Immutable MCP image storage is not model-vision
 transport, and the text context budget still rejects non-text multimodal input.
@@ -76,10 +90,10 @@ continuously, prove what they did, and remember what they learned.**
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![tests](https://img.shields.io/badge/tests-159%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-127%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-171%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
-122 Python modules · 159 registered acceptance tests · one HTML control panel · no
+123 Python modules · 159 registered acceptance tests · one HTML control panel · no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 ```bash
