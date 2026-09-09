@@ -227,8 +227,30 @@ def check_traversal_spellings(sb):
                 f"{rel} resolved outside the root: {p}"
         except fileauth.Denied:
             pass                      # refused outright is also correct
+    typed_traversals = [
+        "effects/../worker.txt", "effects\\..\\worker.txt",
+        "out/../settings.toml", "logs/./agent.log",
+    ]
+    for rel in typed_traversals:
+        try:
+            fileauth.resolve(
+                sb, rel, "read", "harness",
+                allow_zones={fileauth.ZONE_CONTROL, fileauth.ZONE_RUNTIME})
+        except fileauth.Denied:
+            pass
+        else:
+            raise AssertionError(
+                f"typed authority accepted an ambiguous dot path: {rel}")
+    try:
+        fileauth.resolve(sb, "out/../settings.toml", "write", "agent")
+    except fileauth.Denied:
+        pass
+    else:
+        raise AssertionError(
+            "workspace prefix traversal bypassed CONTROL write authority")
     print(f"[traversal] {len(escapes)} escape spellings (posix, windows, UNC, "
-          f"mixed, nested) all refused or contained")
+          f"mixed, nested) all refused or contained; {len(typed_traversals)} "
+          f"typed dot spellings fail closed")
 
 
 def check_credential_sources(sb):

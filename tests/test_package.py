@@ -728,8 +728,15 @@ def check_platform_specific_mutations_are_honest(_work):
     alias = entries["mcp image: physical root alias canonicalization removed"]
     assert len(alias) > 8 and alias[8][0] == "nt", (
         "an actual 8.3 spelling mutation is Windows-only and must say so")
+    for label in (
+            "fileauth: dot path borrows trusted prefix zone",
+            "computer session: caller reclassifies physical alias spelling",
+            "computerbench: missing external artifact escapes contract refusal"):
+        entry = entries[label]
+        assert len(entry) > 6 and entry[6], (
+            label + " exercises a POSIX branch and must not be credited on Windows")
     print("[mutation-platforms] Windows alias cleanup/8.3 spelling and POSIX "
-          "directory-fd anchoring have distinct, explicit applicability")
+          "directory-fd/path-open anchoring have distinct, explicit applicability")
 
 
 def _runner_record(tests, failed=(), skipped=()):

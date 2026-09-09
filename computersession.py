@@ -291,19 +291,33 @@ class ComputerSession:
         for artifact in receipt['artifacts']: self._artifact(artifact)
         return receipt['observation']
 
-    def _artifact(self,meta):
-        path=fileauth.resolve(self.root,meta['path'],'read','harness')
-        C._no_links(path)
+    def _artifact(self,meta,allow_zones=None):
+        try:
+            return self._artifact_checked(meta,allow_zones=allow_zones)
+        except C.Refused:
+            raise
+        except (fileauth.Denied,OSError,ValueError) as error:
+            raise C.Refused('artifact secure read refused') from error
+
+    def _artifact_checked(self,meta,allow_zones=None):
+        path=fileauth.resolve(self.root,meta['path'],'read','harness',
+                              allow_zones=allow_zones)
+        before=C._no_links(path)
         with open(path,'rb') as f:
             info=os.fstat(f.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size!=meta['bytes']:
+            if ((info.st_dev,info.st_ino)!=(before.st_dev,before.st_ino)
+                    or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+                    or info.st_size!=meta['bytes']):
                 raise C.Refused('artifact identity or size changed')
             raw=f.read(meta['bytes']+1)
         if hashlib.sha256(raw).hexdigest()!=meta['sha256']:
             raise C.Refused('artifact bytes changed')
-        if fileauth.resolve(self.root,meta['path'],'read','harness')!=path:
+        if fileauth.resolve(self.root,meta['path'],'read','harness',
+                            allow_zones=allow_zones)!=path:
             raise C.Refused('artifact path changed')
-        C._no_links(path)
+        after=C._no_links(path)
+        if (after.st_dev,after.st_ino)!=(info.st_dev,info.st_ino):
+            raise C.Refused('artifact path changed')
         return raw
 
     def open(self,url):
@@ -396,11 +410,15 @@ class ComputerSession:
             raise C.Refused('owner evidence requires bounded path, digest and byte count')
         with self._serial, (nullcontext() if self._lease is not None else
                            locks.advisory_holding(self._lease_path,timeout=0)):
-            physical=fileauth.resolve(self.root,evidence['path'],'read','harness')
-            rel=os.path.relpath(physical,self.root).replace(os.sep,'/')
-            if fileauth.zone_of(rel) not in (fileauth.ZONE_CONTROL,fileauth.ZONE_RUNTIME):
-                raise C.Refused('owner evidence must be CONTROL or RUNTIME, not worker output alone')
-            self._artifact(evidence)
+            try:
+                fileauth.resolve(
+                    self.root,evidence['path'],'read','harness',
+                    allow_zones={fileauth.ZONE_CONTROL,fileauth.ZONE_RUNTIME})
+                self._artifact(evidence,allow_zones={
+                    fileauth.ZONE_CONTROL,fileauth.ZONE_RUNTIME})
+            except fileauth.Denied as error:
+                raise C.Refused(
+                    'owner evidence must be CONTROL or RUNTIME, not worker output alone') from error
             data=self._load()
             action=next((a for a in data['actions'] if a['id']==action_id),None)
             if action is None or action['state'] not in ('DISPATCHED','UNKNOWN'):

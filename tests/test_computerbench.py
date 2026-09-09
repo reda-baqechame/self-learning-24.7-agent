@@ -400,6 +400,11 @@ class Contract(unittest.TestCase):
         target = self.external / "external.json"
         alias = self.external / "alias.json"
         target.write_text("{}", encoding="utf-8")
+        if os.name == "posix":
+            with self.assertRaises(self.V.ContractError):
+                self.V._secure_external_bytes(
+                    self.external / "missing.json", "artifact",
+                    self.install_root, internal=self.backend.internal)
         if os.name == "nt":
             real_lstat = os.lstat
             class ReparseInfo:

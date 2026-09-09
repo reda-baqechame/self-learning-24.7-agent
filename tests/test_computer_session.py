@@ -171,8 +171,40 @@ class Sessions(unittest.TestCase):
                 with self.assertRaises(SystemExit): s.reconcile(action_id,'authorize_retry','invoice_review',meta)
         (self.root/'worker.txt').write_bytes(evidence_path.read_bytes())
         with self.assertRaises(C.Refused): s.reconcile(action_id,'authorize_retry','invoice_review',dict(meta,path='worker.txt'))
+        with self.assertRaises(C.Refused):
+            s.reconcile(action_id,'authorize_retry','invoice_review',
+                        dict(meta,path='effects/../worker.txt'))
+        for invalid in ('effects/missing.txt','effects/\x00bad.txt'):
+            with self.assertRaises(C.Refused,msg=repr(invalid)):
+                s.reconcile(action_id,'authorize_retry','invoice_review',
+                            dict(meta,path=invalid))
         with self.assertRaises(C.Refused): s.reconcile(action_id,'confirmed_effect','invoice_review',dict(meta,sha256='0'*64))
-        s.reconcile(action_id,'authorize_retry','invoice_review',meta)
+        original_root=s.root
+        alias=None
+        if os.name=='nt':
+            import ctypes
+            buffer=ctypes.create_unicode_buffer(32768)
+            size=ctypes.windll.kernel32.GetShortPathNameW(
+                os.fspath(self.root),buffer,len(buffer))
+            if (0 < size < len(buffer)
+                    and os.path.normcase(buffer.value)
+                    != os.path.normcase(os.fspath(self.root))):
+                alias=buffer.value
+        else:
+            alias_path=self.root/'canonical-root-alias'
+            alias_path.symlink_to(self.root,target_is_directory=True)
+            alias=os.fspath(alias_path)
+        if alias is not None:
+            s.root=alias
+        allowed={self.CS.fileauth.ZONE_CONTROL,
+                 self.CS.fileauth.ZONE_RUNTIME}
+        with patch.object(self.CS.fileauth,'resolve',
+                          wraps=self.CS.fileauth.resolve) as authority:
+            s.reconcile(action_id,'authorize_retry','invoice_review',meta)
+        evidence_call=next(call for call in authority.call_args_list
+                           if len(call.args)>1 and call.args[1]==meta['path'])
+        self.assertEqual(evidence_call.kwargs.get('allow_zones'),allowed)
+        s.root=original_root
         resolved=s.actions()[-1]
         for key,value in original.items(): self.assertEqual(resolved[key],value)
         self.assertEqual(resolved['reconciliations'][-1]['verifier_kind'],'owner_attestation')
@@ -180,6 +212,155 @@ class Sessions(unittest.TestCase):
         restarted=self.session(); restarted.open('https://example.com/')
         restarted.click(restarted.observe(),'one')
         print('[owner-intervention] worker entry and worker-only evidence denied; physical digest checked; UNKNOWN history retained with owner attestation')
+
+    def test_file_authority_path_identity_matrix(self):
+        F=self.CS.fileauth
+        for name in ('effects','logs','out','keys'):
+            (self.root/name).mkdir(exist_ok=True)
+        (self.root/'effects'/'control.txt').write_bytes(b'control')
+        (self.root/'logs'/'runtime.txt').write_bytes(b'runtime')
+        (self.root/'out'/'workspace.txt').write_bytes(b'workspace')
+        (self.root/'root.txt').write_bytes(b'root')
+        allowed={F.ZONE_CONTROL,F.ZONE_RUNTIME}
+        for rel in ('effects/control.txt','logs/runtime.txt',
+                    'effects\\control.txt'):
+            self.assertTrue(Path(F.resolve(
+                self.root,rel,'read','harness',allow_zones=allowed)).exists())
+        for rel in ('root.txt','out/workspace.txt','effects/../root.txt',
+                    'effects\\..\\root.txt','./effects/control.txt',
+                    'logs/./runtime.txt',
+                    '../sibling-root-prefix.txt',str(self.root/'root.txt'),
+                    'C:drive-relative.txt','//server/share/file.txt',
+                    '//?/C:/device-path.txt','effects/\x00bad.txt'):
+            with self.assertRaises(F.Denied,msg=rel):
+                F.resolve(self.root,rel,'read','harness',
+                          allow_zones=allowed)
+        if os.name=='nt':
+            for rel in ('out/file:stream','out/trailing.','out/trailing ',
+                        'out/CON','out/LPT1.txt'):
+                with self.assertRaises(F.Denied,msg=rel):
+                    F.resolve(self.root,rel,'read','harness')
+        else:
+            # POSIX names are case-sensitive and ':' is not an ADS marker.
+            self.assertTrue(F.resolve(
+                self.root,'out/Case:literal','write','harness').endswith(
+                    'Case:literal'))
+
+        alias=None
+        if os.name=='nt':
+            import ctypes
+            buffer=ctypes.create_unicode_buffer(32768)
+            size=ctypes.windll.kernel32.GetShortPathNameW(
+                os.fspath(self.root),buffer,len(buffer))
+            if (0 < size < len(buffer)
+                    and os.path.normcase(buffer.value)
+                    != os.path.normcase(os.fspath(self.root))):
+                alias=buffer.value
+        else:
+            alias_path=self.root.parent/(self.root.name+'-alias')
+            alias_path.symlink_to(self.root,target_is_directory=True)
+            self.addCleanup(alias_path.unlink)
+            alias=os.fspath(alias_path)
+        if alias is not None:
+            resolved=F.resolve(alias,'effects/control.txt','read','harness',
+                               allow_zones=allowed)
+            self.assertTrue(os.path.samefile(
+                resolved,self.root/'effects'/'control.txt'))
+        elif os.name=='nt':
+            print('[path-identity] Windows 8.3 alias is unavailable on this volume; native alias case not run')
+
+        def directory_link(link,target):
+            if os.name=='nt':
+                made=subprocess.run(['cmd','/c','mklink','/J',str(link),
+                                     str(target)],capture_output=True,text=True)
+                if made.returncode:
+                    self.skipTest('cannot create a Windows junction here')
+                self.addCleanup(lambda: os.rmdir(link) if link.exists() else None)
+            else:
+                link.symlink_to(target,target_is_directory=True)
+                self.addCleanup(link.unlink)
+
+        cross=self.root/'effects'/'workspace-alias'
+        directory_link(cross,self.root/'out')
+        for rel in ('effects/workspace-alias/workspace.txt',
+                    'effects/workspace-alias/new.txt'):
+            with self.assertRaises(F.Denied,msg=rel):
+                F.resolve(self.root,rel,'read','harness',
+                          allow_zones=allowed)
+
+        outside=tempfile.TemporaryDirectory(prefix='cs-outside-',
+                                            dir=os.getenv('AGENT_TEST_TMP'))
+        self.addCleanup(outside.cleanup)
+        outside_path=Path(outside.name); (outside_path/'x.txt').write_bytes(b'x')
+        escape=self.root/'out'/'escape'
+        directory_link(escape,outside_path)
+        with self.assertRaises(F.Denied):
+            F.resolve(self.root,'out/escape/x.txt','read','harness')
+
+        secret=self.root/'keys'/'owner.key'
+        secret.write_bytes(b'sk-aaaaaaaaaaaaaaaaaaaa1234')
+        with self.assertRaises(F.Denied):
+            F.resolve(self.root,'keys/owner.key','read','harness')
+        hardlink=self.root/'effects'/'owner-evidence.txt'
+        os.link(secret,hardlink)
+        meta={'path':'effects/owner-evidence.txt',
+              'sha256':hashlib.sha256(secret.read_bytes()).hexdigest(),
+              'bytes':len(secret.read_bytes())}
+        with self.assertRaises(C.Refused):
+            self.session()._artifact(meta,allow_zones=allowed)
+
+        created=F.write_text(self.root,'out/ordinary.txt','ordinary')
+        self.assertEqual(Path(created).read_text(),'ordinary')
+        print('[path-identity] actual platform alias, typed zones, ambiguous spellings, cross-zone/outside links, secret hardlink and ordinary writes follow one authority contract')
+
+    def test_artifact_inode_replacement_before_and_after_open_refuses(self):
+        F=self.CS.fileauth
+        (self.root/'effects').mkdir(exist_ok=True)
+        target=self.root/'effects'/'stable.txt'; raw=b'stable evidence'
+        target.write_bytes(raw)
+        meta={'path':'effects/stable.txt',
+              'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}
+        allowed={F.ZONE_CONTROL,F.ZONE_RUNTIME}
+        s=self.session()
+
+        def replace_inode(suffix):
+            old=target.with_suffix(suffix)
+            os.replace(target,old)
+            fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL)
+            try:
+                os.write(fd,raw)
+            finally:
+                os.close(fd)
+            return old
+
+        real_open=open; swapped=[]
+        def racing_open(path,*args,**kwargs):
+            if os.path.normcase(os.fspath(path))==os.path.normcase(str(target)) \
+                    and args and args[0]=='rb' and not swapped:
+                swapped.append(replace_inode('.before'))
+            return real_open(path,*args,**kwargs)
+        # Credential classification has its own alias/hard-link coverage above.
+        # Isolate it here so the first binary open after `_no_links` is the
+        # artifact descriptor whose pre-open identity binding we are testing.
+        with patch('credentials.is_secret',return_value=False), \
+                patch('builtins.open',side_effect=racing_open):
+            with self.assertRaises(C.Refused):
+                s._artifact(meta,allow_zones=allowed)
+        target.unlink(); os.replace(swapped[0],target)
+
+        real_resolve=F.resolve; calls=0; replaced=[]
+        def racing_resolve(root,rel,*args,**kwargs):
+            nonlocal calls
+            result=real_resolve(root,rel,*args,**kwargs)
+            if rel==meta['path']:
+                calls+=1
+                if calls==2:
+                    replaced.append(replace_inode('.after'))
+            return result
+        with patch.object(F,'resolve',side_effect=racing_resolve):
+            with self.assertRaises(C.Refused):
+                s._artifact(meta,allow_zones=allowed)
+        print('[artifact-race] same-size/same-digest inode replacement before open and after read both refuse before reconciliation state can change')
 
     def test_persistent_lease_health_never_recommends_deletion(self):
         import harness, locks
