@@ -7,8 +7,8 @@ logic it runs, how you interact with it, and what it does **not** do.
 written by reading the code, not from memory; where a claim could rot, the
 test that keeps it honest is named.
 
-**Scale, so you know what you are reading about:** 123 Python modules,
-one HTML file for the whole UI, 159 registered acceptance tests, zero third-party
+**Scale, so you know what you are reading about:** 124 Python modules,
+one HTML file for the whole UI, 160 registered acceptance tests, zero third-party
 dependencies. Python 3.11+ and your own API keys.
 
 ---
@@ -1687,7 +1687,7 @@ through an example; it walks the tree:
 
 | Check | What it enumerates |
 |---|---|
-| execution paths | every subprocess call site in 123 modules |
+| execution paths | every subprocess call site in 124 modules |
 | execution catalogue | every declared operation, against what it declares |
 | filesystem zones | every declared control file and directory |
 | traversal spellings | 12 escape forms (posix, windows, UNC, mixed, nested) |
@@ -1971,7 +1971,7 @@ Eleven are done; the twelfth is by definition what comes next.
 |---|---|---|
 | 1 | version control, known-good baseline | **done** — git, with the remediation split across commits |
 | 2 | no browser-origin/CSRF into mutating APIs; no free-form network-supplied shell gates | **done** — `_same_origin` on every mutating verb (`test_csrf.py`); `gates.py` is a closed catalogue and a raw string is refused |
-| 3 | one canonical Execution Authority; no alternate path may exist | **done** — `execution.py`, and `--audit` scans all 123 modules for a bypass (`test_invariants.py`) |
+| 3 | one canonical Execution Authority; no alternate path may exist | **done** — `execution.py`, and `--audit` scans all 124 modules for a bypass (`test_invariants.py`) |
 | 4 | agent workspace separated from control state; all filesystem ops through File Authority | **done** — `fileauth.py` with four zones, enforced per zone rather than per file |
 | 5 | `file://` and SSRF blocked; redirects/DNS/IP revalidated | **done** — scheme allowlist, blocked networks, and a redirect handler that re-checks (`test_url.py`) |
 | 6 | one Credential Authority; backup/package/health/runtime agree | **done** — `credentials.py`; `test_invariants` asks the same four sources of every subsystem |

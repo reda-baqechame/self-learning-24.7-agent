@@ -18,8 +18,10 @@ import fileauth
 import locks
 import mcp
 import computerprocess
+import computerverify
 
-TERMINAL = frozenset({'VERIFIED','REFUSED','FAILED_WITH_KNOWN_NO_EFFECT','UNKNOWN'})
+TERMINAL = frozenset({'VERIFIED','REFUSED','FAILED_WITH_KNOWN_NO_EFFECT',
+                      'FAILED_POSTCONDITION','UNKNOWN'})
 
 def _digest(value):
     return hashlib.sha256(C._canonical(value)).hexdigest()
@@ -78,6 +80,9 @@ class ComputerSession:
         self._key = secrets.token_bytes(32)
         self._serial = threading.RLock()
         self._lease = None
+        self._index_lease = None
+        self._output_leases = {}
+        self._output_claims = {}
         self._spec = self._configuration()
         self._spec_digest = _digest(self._spec)
         self.origin = C._origin(self._spec['computer_policy']['allowed_origin'], configured=True)
@@ -96,11 +101,17 @@ class ComputerSession:
             self._lease = None
             raise C.Refused('browser session lease belongs to another task') from error
         try:
+            self._index_lease=locks.advisory_holding(
+                computerverify.index_lease_path(self.root,self.lineage),timeout=0)
+            self._index_lease.__enter__()
+            self._register_ledger()
             self._recover()
         except BaseException:
             # No usable instance escapes construction. Durable quarantine,
             # not an in-memory context manager, must exclude later lineages.
             self.state='tainted'
+            if self._index_lease is not None:
+                self._index_lease.__exit__(None,None,None); self._index_lease=None
             self._lease.__exit__(None,None,None); self._lease=None
             raise
 
@@ -167,15 +178,93 @@ class ComputerSession:
 
     def _load(self):
         path = fileauth.resolve(self.root,self._rel,'read','harness')
-        if not os.path.exists(path): return {'actions':[]}
+        binding={'lineage':self.lineage,'server':self.server_name}
+        if not os.path.exists(path):
+            return {'binding':binding,'actions':[],'workflows':[],
+                    'next_environment_incarnation':0}
         with open(path,encoding='utf-8') as f: data=json.load(f)
         if not isinstance(data,dict) or not isinstance(data.get('actions'),list):
             raise C.Refused('invalid computer action ledger')
+        stored=data.get('binding')
+        if stored is None:
+            if any(str(action.get('task'))!=self.task_id
+                   or str(action.get('lineage'))!=self.lineage
+                   for action in data['actions'] if isinstance(action,dict)):
+                raise C.Refused('legacy computer action ledger binding differs')
+            data['binding']=binding
+        elif stored!=binding:
+            raise C.Refused('computer action ledger binding differs')
+        data.setdefault('workflows',[])
+        data.setdefault('next_environment_incarnation',0)
+        if (not isinstance(data['workflows'],list)
+                or type(data['next_environment_incarnation']) is not int
+                or data['next_environment_incarnation']<0):
+            raise C.Refused('invalid computer workflow ledger')
         return data
 
     def _save(self,data):
         # File Authority writes unique temp, flushes/fsyncs, then atomically replaces.
         fileauth.write_json(self.root,self._rel,data,actor='harness',durable=True)
+
+    def _index(self):
+        path=computerverify.index_path(self.root,self.lineage)
+        if not os.path.exists(path):
+            return {'schema':computerverify.INDEX_SCHEMA,'state':'COMMITTED',
+                    'first_task':self.task_id,'lineage':self.lineage,'revision':0,
+                    'ledgers':{},'workflows':{}}
+        return computerprocess.read(self.root,computerverify.index_rel(self.lineage))
+
+    def _save_index(self,value):
+        fileauth.write_json(self.root,computerverify.index_rel(self.lineage),
+                            value,actor='harness',durable=True)
+
+    def _recover_index(self,index):
+        if index.get('state')!='PREPARED': return index
+        pending=index.get('pending') or {}
+        try:
+            ledger=computerprocess.read(self.root,pending['ledger'])
+            if pending['kind']=='register':
+                if ledger.get('binding')!=pending['binding']: raise ValueError
+                index['ledgers'][pending['ledger']]=pending['binding']
+            elif pending['kind']=='workflow':
+                rows=[w for w in ledger.get('workflows',[])
+                      if w.get('id')==pending['workflow_id']
+                      and w.get('contract_sha256')==pending['contract_sha256']]
+                if len(rows)!=1: raise ValueError
+                index['workflows'][pending['workflow_id']]={
+                    'ledger':pending['ledger'],
+                    'contract_sha256':pending['contract_sha256']}
+            else: raise ValueError
+        except (KeyError,ValueError,OSError,TypeError):
+            index['state']='ABORTED'; index['abort_reason']='incomplete index transaction'
+            index.pop('pending',None); self._save_index(index)
+            raise C.Refused('computer lineage index transaction is incomplete')
+        index['state']='COMMITTED'; index.pop('pending',None); self._save_index(index)
+        return index
+
+    def _register_ledger(self):
+        index=self._index()
+        if (not isinstance(index,dict) or index.get('schema')!=computerverify.INDEX_SCHEMA
+                or index.get('lineage')!=self.lineage
+                or index.get('state')=='ABORTED'):
+            raise C.Refused('computer lineage index binding is unavailable')
+        index=self._recover_index(index)
+        if index.get('state')!='COMMITTED' or not isinstance(index.get('ledgers'),dict) \
+                or not isinstance(index.get('workflows'),dict):
+            raise C.Refused('computer lineage index is malformed')
+        binding={'lineage':self.lineage,'server':self.server_name}
+        if index['ledgers'].get(self._rel)==binding:
+            self._save(self._load())
+            return
+        if self._rel in index['ledgers']:
+            raise C.Refused('computer lineage ledger registration differs')
+        prepared=dict(index,state='PREPARED',revision=int(index.get('revision',0))+1,
+                      pending={'kind':'register','ledger':self._rel,'binding':binding})
+        self._save_index(prepared)
+        self._save(self._load())
+        prepared['ledgers']=dict(prepared['ledgers'],**{self._rel:binding})
+        prepared['state']='COMMITTED'; prepared.pop('pending',None)
+        self._save_index(prepared)
 
     def actions(self):
         with self._serial: return self._load()['actions']
@@ -209,7 +298,7 @@ class ComputerSession:
         if environment:
             try:
                 computerprocess.cleanup(self.root,environment)
-                self._terminalize(owner['ledger'])
+                self._terminalize(owner['ledger'],environment)
             except BaseException as error:
                 self._quarantine(error)
                 raise
@@ -229,20 +318,30 @@ class ComputerSession:
             # every claimant. Preserve system interruption even if disk fails.
             original.add_note('Quarantine refresh failed: '+type(persistence_error).__name__)
 
-    def _terminalize(self,relative):
+    def _cleanup_receipt(self,environment):
+        metadata=computerprocess.read(self.root,environment)
+        if metadata.get('state')!='closed':
+            raise C.Refused('owned environment closure is unconfirmed')
+        return {'environment':environment,'state':'closed',
+                'metadata_sha256':_digest(metadata),'confirmed_at':time.time()}
+
+    def _terminalize(self,relative,environment=None):
         if not relative.startswith('effects/computer/') or not relative.endswith('.json'):
             raise C.Refused('invalid owned action ledger')
         path=fileauth.resolve(self.root,relative,'read','harness')
         if not os.path.exists(path): return
         data=computerprocess.read(self.root,relative)
+        cleanup=self._cleanup_receipt(environment) if environment else None
         for action in data['actions']:
             if action['state']=='PREPARED':
                 action.update(state='FAILED_WITH_KNOWN_NO_EFFECT',reason='owner terminated before dispatch')
             elif action['state']=='DISPATCHED':
                 action.update(state='UNKNOWN',reason='owner terminated before independent verification')
+                if cleanup is not None and action.get('environment')==environment:
+                    action['cleanup_receipt']=cleanup
         fileauth.write_json(self.root,relative,data,actor='harness',durable=True)
 
-    def _prepare(self, operation, intent):
+    def _prepare(self, operation, intent, workflow_id=None):
         self._boundary(mutation=True)
         data=self._load(); key=_digest([self.lineage,self.server_name,operation,intent])
         for action in data['actions']:
@@ -254,8 +353,230 @@ class ComputerSession:
                 'intent':intent,'task':self.task_id,'lineage':self.lineage,
                 'epoch':self.epoch,'state':'PREPARED','prepared_at':time.time(),
                 'dispatch_acknowledged':False,'workflow_verified':False}
+        if workflow_id is not None:
+            workflows=[w for w in data['workflows'] if w.get('id')==workflow_id]
+            if len(workflows)!=1: raise C.Refused('frozen invoice workflow is unavailable')
+            workflow=workflows[0]; contract=computerverify.validate_contract(workflow['contract'])
+            position=len(workflow.get('action_ids') or [])
+            if position>=len(contract['intents']):
+                raise C.Refused('frozen invoice workflow has no remaining intent')
+            expected=contract['intents'][position]
+            if (operation!='click' or intent.get('target_id')!=expected['target_id']
+                    or intent.get('href')!=expected['destination']):
+                raise C.Refused('click differs from next frozen invoice intent')
+            prior=[]
+            for identity in workflow.get('action_ids') or []:
+                item=next((d for d in data['actions'] if d.get('id')==identity),None)
+                if item is None: raise C.Refused('invoice workflow action history is missing')
+                prior.append(item)
+            if any(computerverify.effective_action_status(self.root,item,workflow,contract)
+                   not in ('VERIFIED','VERIFIED_BY_POSTCONDITION') for item in prior):
+                raise C.Refused('prior invoice action lacks independent verification')
+            action.update(workflow_id=workflow_id,
+                          contract_sha256=workflow['contract_sha256'],
+                          intent_index=position,required_for_task=True)
         data['actions'].append(action); self._save(data)
         return action['id']
+
+    def _hold_output_path(self,output_dir,claimant):
+        binding=computerverify.output_binding(self.root,output_dir)
+        key=computerverify.output_lease_rel(binding)
+        owner=self._output_claims.get(key)
+        if owner is not None and owner!=claimant:
+            raise C.Refused('invoice output authority belongs to another workflow')
+        if key not in self._output_leases:
+            path=fileauth.resolve(self.root,key,'write','harness')
+            context=locks.advisory_holding(path,timeout=0)
+            try: context.__enter__()
+            except TimeoutError as error:
+                raise C.Refused('invoice output authority belongs to another workflow') from error
+            self._output_leases[key]=context
+        self._output_claims[key]=claimant
+        return binding,key
+
+    def _hold_output_lease(self,contract,workflow_id):
+        binding,key=self._hold_output_path(contract['output_dir'],workflow_id)
+        if binding!=contract['output_identity'] or key!=contract['output_lease']:
+            raise C.Refused('invoice output authority identity changed')
+        if not computerverify.output_claim_matches(
+                self.root,binding,workflow_id,computerverify.canonical_digest(contract),self._rel):
+            raise C.Refused('durable invoice output claim differs')
+
+    def freeze_invoice_workflow(self,output_dir,manifest,expectation_source,
+                                account,intents,deadline_seconds=30):
+        """Trusted controller API. It is deliberately absent from model tools."""
+        with self._serial:
+            self._boundary(mutation=True)
+            for intent in intents if isinstance(intents,list) else []:
+                if C._origin(intent.get('destination'))!=self.origin:
+                    raise C.Refused('frozen invoice destination origin denied')
+            output_binding=computerverify.output_binding(self.root,output_dir)
+            output_key=computerverify.output_lease_rel(output_binding)
+            if output_key in self._output_claims:
+                raise C.Refused('invoice output authority already belongs to another workflow')
+            already_held=output_key in self._output_leases
+            held_binding,held_key=self._hold_output_path(output_dir,'FREEZE_PENDING')
+            prior_claim=computerverify.recover_output_claim(self.root,held_binding)
+            if prior_claim is not None and prior_claim['state']!='ABORTED':
+                context=self._output_leases.pop(output_key,None)
+                self._output_claims.pop(output_key,None)
+                if context is not None: context.__exit__(None,None,None)
+                raise C.Refused('invoice output authority has a durable workflow claim')
+            try:
+                contract=computerverify.build_contract(
+                    self.root,self.task_id,self.lineage,self.epoch,
+                    self.policy_revision,self.server_name,self.origin,output_dir,
+                    manifest,expectation_source,account,intents,deadline_seconds,
+                    expected_output_binding=held_binding)
+            except BaseException:
+                if not already_held:
+                    context=self._output_leases.pop(output_key,None)
+                    if context is not None: context.__exit__(None,None,None)
+                self._output_claims.pop(output_key,None)
+                raise
+            digest=computerverify.canonical_digest(contract)
+            workflow_id=digest[:32]
+            claim={'schema':computerverify.CLAIM_SCHEMA,'state':'PREPARED',
+                   'output_identity':held_binding,'workflow_id':workflow_id,
+                   'contract_sha256':digest,'ledger':self._rel,
+                   'task':self.task_id,'lineage':self.lineage,'server':self.server_name,
+                   'revision':(prior_claim['revision']+1 if prior_claim else 1),
+                   'prior_claim_sha256':(computerverify.canonical_digest(prior_claim)
+                                         if prior_claim else None)}
+            computerverify.write_output_claim(self.root,claim)
+            data=self._load()
+            existing=[w for w in data['workflows'] if w.get('id')==workflow_id]
+            if existing:
+                if len(existing)!=1 or existing[0].get('contract_sha256')!=digest:
+                    raise C.Refused('invoice workflow identity collision')
+                return {'workflow_id':workflow_id,'contract_sha256':digest}
+            index=self._recover_index(self._index())
+            if index.get('state')!='COMMITTED' or index['ledgers'].get(self._rel)!=data['binding']:
+                raise C.Refused('computer lineage index is not committed')
+            prepared=dict(index,state='PREPARED',revision=int(index.get('revision',0))+1,
+                          pending={'kind':'workflow','ledger':self._rel,
+                                   'workflow_id':workflow_id,
+                                   'contract_sha256':digest})
+            self._save_index(prepared)
+            data['workflows'].append({'id':workflow_id,'contract_sha256':digest,
+                                      'contract':contract,'action_ids':[],
+                                      'verification_attempts':[]})
+            self._save(data)
+            prepared['workflows']=dict(prepared['workflows'])
+            prepared['workflows'][workflow_id]={'ledger':self._rel,
+                                                 'contract_sha256':digest}
+            prepared['state']='COMMITTED'; prepared.pop('pending',None)
+            self._save_index(prepared)
+            computerverify.commit_output_claim(self.root,claim)
+            self._output_claims[output_key]=workflow_id
+            return {'workflow_id':workflow_id,'contract_sha256':digest}
+
+    def verify_invoice_action(self,action_id,workflow_id):
+        """Quiesce executor and independently terminalize one frozen intent."""
+        with self._serial:
+            self._boundary()
+            data=self._load()
+            workflows=[w for w in data['workflows'] if w.get('id')==workflow_id]
+            action=next((a for a in data['actions'] if a.get('id')==action_id),None)
+            if len(workflows)!=1 or action is None or action.get('workflow_id')!=workflow_id:
+                raise C.Refused('invoice action/workflow binding is unavailable')
+            workflow=workflows[0]
+            contract=computerverify.validate_contract(workflow['contract'])
+            if (computerverify.canonical_digest(contract)!=workflow['contract_sha256']
+                    or action.get('contract_sha256')!=workflow['contract_sha256']):
+                raise C.Refused('invoice action contract binding changed')
+            effective=computerverify.effective_action_status(self.root,action,workflow,contract)
+            if effective in ('VERIFIED','VERIFIED_BY_POSTCONDITION'):
+                if effective=='VERIFIED': return action['postcondition_receipt']
+                return action['postcondition_resolutions'][-1]['receipt']
+            if action.get('state') in ('VERIFIED','UNKNOWN') and \
+                    (action.get('postcondition_receipt') or action.get('postcondition_resolutions')):
+                raise C.Refused('stored independent postcondition receipt is invalid')
+            if action.get('state')=='DISPATCHED':
+                self._quiesce(action_id); data=self._load()
+                workflow=next(w for w in data['workflows'] if w['id']==workflow_id)
+                action=next(a for a in data['actions'] if a['id']==action_id)
+            elif action.get('state')!='UNKNOWN':
+                raise C.Refused('invoice action is not pending independent verification')
+            if not isinstance(action.get('cleanup_receipt'),dict):
+                raise C.Refused('owned environment cleanup receipt is unavailable')
+            self._hold_output_lease(contract,workflow_id)
+            attempts=action.setdefault('verification_attempts',[])
+            for attempt in attempts:
+                if attempt.get('result')=='STARTED':
+                    attempt.update(result='INTERRUPTED',finished_at=time.time(),
+                                   reason='incomplete prior verification attempt')
+            sequence=len(attempts)+1
+            started={'sequence':sequence,'result':'STARTED','started_at':time.time(),
+                     'deadline_at':contract['deadline_at'],'verifier':dict(computerverify.VERIFIER),
+                     'action_id':action_id,'workflow_id':workflow_id,
+                     'contract_sha256':workflow['contract_sha256']}
+            attempts.append(started); self._save(data)
+            try:
+                readbacks=computerverify.verify_prefix(
+                    self.root,contract,action['intent_index']+1)
+            except BaseException as error:
+                data=self._load(); current=next(a for a in data['actions'] if a['id']==action_id)
+                attempt=current['verification_attempts'][-1]
+                attempt.update(result=('INTERRUPTED' if isinstance(error,(KeyboardInterrupt,SystemExit))
+                                       else 'REFUSED' if isinstance(error,computerverify.PredicateMismatch)
+                                       else 'UNAVAILABLE'),
+                               finished_at=time.time(),reason=str(error)[:300])
+                if isinstance(error,computerverify.PredicateMismatch) \
+                        and current.get('state')=='DISPATCHED':
+                    current.update(state='FAILED_POSTCONDITION',
+                                   reason=str(error)[:300],
+                                   verification_scope='invoice_exact_prefix',
+                                   workflow_verified=False)
+                self._save(data)
+                if isinstance(error,(KeyboardInterrupt,SystemExit)): raise
+                if isinstance(error,C.Refused): raise
+                raise C.Refused('independent invoice verifier unavailable') from error
+            data=self._load(); workflow=next(w for w in data['workflows'] if w['id']==workflow_id)
+            action=next(a for a in data['actions'] if a['id']==action_id)
+            if action.get('state') not in ('DISPATCHED','UNKNOWN'):
+                raise C.Refused('invoice action changed before terminalization')
+            position=action['intent_index']; prior=[]
+            for identity in workflow['action_ids'][:position]:
+                item=next(a for a in data['actions'] if a['id']==identity)
+                if computerverify.effective_action_status(self.root,item,workflow,contract) not in ('VERIFIED','VERIFIED_BY_POSTCONDITION'):
+                    raise C.Refused('verified invoice prefix history changed')
+                prior.append(contract['intents'][item['intent_index']]['invoice_id'])
+            body={'schema':computerverify.RECEIPT_SCHEMA,'result':'VERIFIED',
+                  'action_id':action_id,'intent_key':action['intent_key'],
+                  'workflow_id':workflow_id,'contract_sha256':workflow['contract_sha256'],
+                  'task':self.task_id,'lineage':self.lineage,'epoch':action['epoch'],
+                  'policy_revision':contract['policy_revision'],
+                  'verifier':dict(computerverify.VERIFIER),
+                  'expectation_source':contract['expectation_source'],
+                  'account':contract['account'],'sequence':sequence,
+                  'verified_at':time.time(),'prior_verified_ids':prior,
+                  'readbacks':readbacks,'cleanup_receipt':action['cleanup_receipt'],
+                  'workflow_verified':position+1==len(contract['intents'])}
+            receipt_id=computerverify.canonical_digest(body)
+            receipt=dict(body,receipt_id=receipt_id,receipt_sha256=receipt_id)
+            attempt=action['verification_attempts'][-1]
+            if attempt.get('result')!='STARTED' or attempt.get('sequence')!=sequence:
+                raise C.Refused('verification attempt changed before terminalization')
+            attempt.update(result='VERIFIED',finished_at=time.time(),
+                           receipt_id=receipt_id,receipt_sha256=receipt_id)
+            if action['state']=='UNKNOWN':
+                action.setdefault('postcondition_resolutions',[]).append({
+                    'kind':'independent_postcondition','recorded_at':time.time(),
+                    'receipt':receipt})
+            else:
+                action.update(state='VERIFIED',postcondition_receipt=receipt,
+                              verification_scope='invoice_exact_prefix')
+            action['workflow_verified']=receipt['workflow_verified']
+            workflow['verified_prefix']=position+1
+            self._save(data)
+            if receipt['workflow_verified']:
+                if self._output_claims.get(contract['output_lease'])!=workflow_id:
+                    raise C.Refused('invoice output authority release owner changed')
+                context=self._output_leases.pop(contract['output_lease'],None)
+                self._output_claims.pop(contract['output_lease'],None)
+                if context is not None: context.__exit__(None,None,None)
+            return receipt
 
     def _update(self,identity,**fields):
         data=self._load(); action=next(a for a in data['actions'] if a['id']==identity)
@@ -265,7 +586,19 @@ class ComputerSession:
 
     def _dispatch(self,identity):
         self._boundary(mutation=True)
-        self._update(identity,state='DISPATCHED',dispatched_at=time.time())
+        data=self._load(); environment=data.get('environment')
+        action=next(a for a in data['actions'] if a['id']==identity)
+        if action['state'] in TERMINAL: raise C.Refused('terminal computer action is immutable')
+        workflow_id=action.get('workflow_id')
+        if workflow_id is not None:
+            workflows=[w for w in data['workflows'] if w.get('id')==workflow_id]
+            if len(workflows)!=1: raise C.Refused('frozen workflow disappeared before dispatch')
+            action_ids=workflows[0].setdefault('action_ids',[])
+            if action.get('intent_index')!=len(action_ids):
+                raise C.Refused('frozen workflow dispatch order changed')
+            action_ids.append(identity)
+        action.update(state='DISPATCHED',dispatched_at=time.time(),environment=environment)
+        self._save(data)
 
     def _failure(self,identity,error):
         action=next(a for a in self.actions() if a['id']==identity)
@@ -282,12 +615,19 @@ class ComputerSession:
 
     def _connect(self):
         if self.server is None:
-            environment='effects/computer/process-'+self.epoch+'.json'
+            data=self._load()
+            incarnation=data['next_environment_incarnation']+1
+            environment=('effects/computer/process-'+self.epoch+'-'+
+                         str(incarnation)+'.json')
+            data['next_environment_incarnation']=incarnation
+            data['environment']=environment
+            data.setdefault('environment_history',[]).append(environment)
+            self._save(data)
             fileauth.write_json(self.root,environment,{'state':'created','token':self.epoch,
-                'job':'Local\\agent-computer-'+self.epoch},actor='harness')
+                'incarnation':incarnation,
+                'job':'Local\\agent-computer-'+self.epoch+'-'+str(incarnation)},actor='harness')
             self._save_owner({'server':self.server_name,'state':'owned','environment':environment,
                               'ledger':self._rel,'task':self.task_id,'lineage':self.lineage,'epoch':self.epoch})
-            data=self._load(); data['environment']=environment; self._save(data)
             try:
                 self.server=mcp.connect(self.root,self.server_name,role=self.role,
                                         owned_process=(self.root,environment))
@@ -296,6 +636,35 @@ class ComputerSession:
                 self._quarantine(error)
                 raise
             self.state='active'
+
+    def _quiesce(self,action_id):
+        action=next((a for a in self.actions() if a.get('id')==action_id),None)
+        if action is None or action.get('state')!='DISPATCHED':
+            raise C.Refused('only a dispatched action can enter quiescent verification')
+        environment=action.get('environment')
+        if not environment: raise C.Refused('dispatched action lacks environment incarnation')
+        self.state='quiescing'
+        try:
+            if self.server is not None:
+                self.server.close(); self.server=None
+            computerprocess.cleanup(self.root,environment)
+            cleanup=self._cleanup_receipt(environment)
+            owner=computerprocess.read(self.root,self._owner_rel)
+            if owner.get('environment') not in (None,environment):
+                raise C.Refused('owned environment incarnation changed during quiescence')
+            owner.update(state='closed',environment=None); self._save_owner(owner)
+            data=self._load(); current=next(a for a in data['actions'] if a['id']==action_id)
+            if current.get('state')!='DISPATCHED' or current.get('environment')!=environment:
+                raise C.Refused('dispatched action changed during quiescence')
+            current['cleanup_receipt']=cleanup; data.pop('environment',None); self._save(data)
+            self.state='quiescent'
+            return cleanup
+        except BaseException as error:
+            self.state='tainted'
+            try: self._failure(action_id,error)
+            except BaseException: pass
+            self._quarantine(error)
+            raise
 
     def _seal(self,state,artifacts=None):
         raw=state.get('view_context') or {}
@@ -404,14 +773,15 @@ class ComputerSession:
             except C.Unresolved:
                 self.state='tainted'; self.server.close(); raise
 
-    def click(self,receipt,target_id):
+    def click(self,receipt,target_id,workflow_id=None):
         with self._serial:
             self._boundary(mutation=True)
             observation=self._unseal(receipt)
             links=[x for x in observation['state']['links'] if x['id']==target_id]
             if len(links)!=1: raise C.Refused('target absent')
             identity=self._prepare('click',{'page':observation['state']['url'],
-                                          'target_id':target_id,'href':links[0]['href']})
+                                           'target_id':target_id,'href':links[0]['href']},
+                                   workflow_id=workflow_id)
             artifacts=[]
             post_view=[]
             def dispatch(p):
@@ -444,6 +814,12 @@ class ComputerSession:
                 self._quarantine(error)
                 raise
             else:
+                for context in list(self._output_leases.values()):
+                    context.__exit__(None,None,None)
+                self._output_leases.clear()
+                self._output_claims.clear()
+                if self._index_lease is not None:
+                    self._index_lease.__exit__(None,None,None); self._index_lease=None
                 if self._lease is not None:
                     self._lease.__exit__(None,None,None); self._lease=None
                 self.state='closed'

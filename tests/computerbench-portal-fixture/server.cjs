@@ -1,6 +1,6 @@
 // Synthetic-only supplier portal. Runs inside the network-disabled browser container.
 const http = require('node:http');
-const payload = id => JSON.stringify({id, month:'2026-08', total_cents:1200+Number(id.slice(-1))});
+const payload = id => JSON.stringify({id, month:'2026-08', account:'fixture-owner@example.invalid', total_cents:1200+Number(id.slice(-1))});
 http.createServer((req,res) => {
   const url = new URL(req.url,'http://127.0.0.1:8765');
   const mode = url.searchParams.get('case') || 'normal';

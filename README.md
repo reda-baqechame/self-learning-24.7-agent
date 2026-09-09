@@ -89,11 +89,11 @@ continuously, prove what they did, and remember what they learned.**
 [![tests](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
-![tests](https://img.shields.io/badge/tests-159%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-194%20registered-blue)
+![tests](https://img.shields.io/badge/tests-160%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-215%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
-123 Python modules · 159 registered acceptance tests · one HTML control panel · no
+124 Python modules · 160 registered acceptance tests · one HTML control panel · no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 ```bash
@@ -245,7 +245,7 @@ are laws with tests that would fail, not features with descriptions.**
 | Long context | a bigger window | **recursive sub-calls** (the RLM result, MIT 2025): the material never enters the window — slices go to disposable sub-calls on the cheapest rail, only distilled answers return, metered and contained like every call |
 | New tools | a fixed integration catalogue, or an agent that installs what it likes | **the capability frontier**: an agent may PROPOSE a tool it lacks, never author the test — it declares an import or a binary, the *platform* generates the probe, and the probe must FAIL before anything is installed. Readiness is decided by a seal outside the agent's reach, and a human adopts it from a terminal |
 | Knowing what a goal needs | a prompt asking the model to list its tools | two measured corpora, 50 goals across 40+ trades, pinned as tests. The broad set went **24% → 100%** honest coverage; the adversarial set found that **5 goals carrying irreversible physical or financial effects did not stop for the owner** — cutting power to a heater, changing a CNC feed rate, filing a claim in your name — because every authority rule was about a digital permission and none about a machine that moves. Now 0 |
-| Dependencies | large stacks | Python stdlib. Zero. 159 registered tests; six configured CI jobs (current results must be inspected separately) |
+| Dependencies | large stacks | Python stdlib. Zero. 160 registered tests; six configured CI jobs (current results must be inspected separately) |
 | Your state | often hosted, often theirs | files you own, provider-universal (any key, or a zero-key local model) — the model is a swappable part; the memory, graders, runbooks and ledgers are the asset |
 
 Four shipped archetypes cover the famous products' ground on this
@@ -304,7 +304,7 @@ control defends the path its author was thinking about, and does not know
 about the other paths.* Six places executed shell; one was tested. The answer
 is one mandatory gateway per kind of power — Execution, File, Credential,
 Model Gateway, Effect, Control Plane — and `python execution.py --audit`
-fails the build if any module bypasses one. Today: **0 violations across 123
+fails the build if any module bypasses one. Today: **0 violations across 124
 modules**, 19 declared platform-internal.
 
 The sixth arrived the same way the pattern predicts. A later audit asked what
@@ -537,7 +537,7 @@ was wrong.
 
 **The tests enumerate rather than exemplify.** `tests/test_invariants.py`
 does not test through an example — it walks the tree: every subprocess call
-site in 123 modules, every declared control file, 12 traversal spellings, all
+site in 124 modules, every declared control file, 12 traversal spellings, all
 4 credential sources against every subsystem that must exclude them, all 9
 provider-call purposes, all 9 roles, every module that mints an expert, every
 reader of the exam file, the sandbox names across all test files, all
@@ -669,7 +669,7 @@ build is cleared.** The full table is in
 
 ```bash
 python demo.py            # the whole platform, keyless, in one run
-python tests/run_all.py   # 159 registered acceptance tests
+python tests/run_all.py   # 160 registered acceptance tests
 python proof.py           # what is proven, and to what level
 python evidence.py        # why we believe it, and where belief runs out
 python metrics.py         # is it working — and the numbers it refuses to invent

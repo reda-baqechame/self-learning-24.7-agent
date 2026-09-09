@@ -68,7 +68,7 @@ TESTS = ["test_resume.py", "test_lock.py", "test_json_toolcall.py",
          "test_transactional_contracts.py", "test_correctness_patch.py",
          "test_ledger_defects.py", "test_http_operators.py",
          "test_reconciler.py", "test_watchdog.py", "test_sentinels.py",
-         "test_twin.py", "test_twin_measurement.py", "test_computeruse.py", "test_computeruse_live.py", "test_computer_session.py", "test_computerbench.py"]
+         "test_twin.py", "test_twin_measurement.py", "test_computeruse.py", "test_computeruse_live.py", "test_computer_session.py", "test_computer_postconditions.py", "test_computerbench.py"]
 
 
 def decode_child_output(raw):

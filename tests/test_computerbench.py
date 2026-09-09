@@ -443,14 +443,23 @@ class Contract(unittest.TestCase):
                 "artifact_outcome": "rejected", "cleanup": {"confirmed": True},
                 "action_attempted": False, "actions": []}
         self.assertEqual(B._development_status(base), "safe_refusal")
+        self.assertEqual(B._development_status(dict(
+            base, artifact_outcome="verified")), "safe_refusal")
         changed = dict(base, controller_outcome="completed",
                        action_attempted=True,
-                       actions=[{"state": "VERIFIED"}])
-        self.assertEqual(B._development_status(changed), "rejected_artifacts")
+                       actions=[{"state": "VERIFIED", "operation": "click",
+                                 "required_for_task": True}])
+        self.assertEqual(B._development_status(changed), "unresolved")
 
         rejected = dict(base, case="corrupt", controller_outcome="completed",
                         action_attempted=True,
-                        actions=[{"state": "VERIFIED"}])
+                        actions=[{"state": "VERIFIED", "operation": "click",
+                                  "required_for_task": True}])
+        self.assertEqual(B._development_status(rejected), "unresolved")
+        rejected = dict(base, case="corrupt", controller_outcome="refused",
+                        action_attempted=True,
+                        actions=[{"state": "FAILED_POSTCONDITION",
+                                  "operation": "click"}])
         self.assertEqual(B._development_status(rejected), "rejected_artifacts")
         changed = dict(rejected, controller_outcome="refused",
                        action_attempted=False, actions=[])
@@ -466,8 +475,10 @@ class Contract(unittest.TestCase):
         self.assertEqual(B._development_status(durable_unknown), "unresolved")
 
         verified = dict(base, case="normal", controller_outcome="completed",
-                        artifact_outcome="verified", action_attempted=True,
-                        actions=[{"state": "VERIFIED"}])
+                         artifact_outcome="verified", action_attempted=True,
+                         actions=[{"state": "VERIFIED", "operation": "click",
+                                   "required_for_task": True}],
+                         postcondition_completion={"passed": True})
         self.assertEqual(B._development_status(verified),
                          "verified_completion")
         self.assertEqual(B._development_status(
@@ -479,11 +490,18 @@ class Contract(unittest.TestCase):
                     for name in list(B.DEVELOPMENT_EXPECTED) +
                     ["fabricated-terminal-label"]}
         self.assertEqual(statuses, {"safe_refusal"})
+        rejected_evidence = dict(
+            verified, artifact_outcome="rejected")
+        statuses = {B._development_status(dict(rejected_evidence, case=name))
+                    for name in list(B.DEVELOPMENT_EXPECTED) +
+                    ["fabricated-terminal-label"]}
+        self.assertEqual(statuses, {"rejected_artifacts"})
 
     def test_development_summary_separates_refusals_from_retrievals(self):
         rows = []
         for case, expected in B.DEVELOPMENT_EXPECTED.items():
-            completed = expected != "safe_refusal"
+            completed = expected == "verified_completion"
+            rejected = expected == "rejected_artifacts"
             rows.extend({
                 "case": case, "repeat": repeat, "status": expected,
                 "expected": expected, "development_expectation_met": True,
@@ -491,8 +509,13 @@ class Contract(unittest.TestCase):
                 "controller_outcome": "completed" if completed else "refused",
                 "artifact_outcome": ("verified" if expected ==
                                       "verified_completion" else "rejected"),
-                "action_attempted": completed,
-                "actions": ([{"state": "VERIFIED"}] if completed else [])}
+                "action_attempted": completed or rejected,
+                "postcondition_completion": {"passed": completed},
+                "actions": ([{"state": "VERIFIED", "operation": "click",
+                               "required_for_task": True}]
+                            if completed else
+                            ([{"state": "FAILED_POSTCONDITION",
+                               "operation": "click"}] if rejected else []))}
                 for repeat in range(1, 4))
         report = B.summarize_development(rows)
         self.assertEqual(report["statuses"], {
@@ -940,6 +963,22 @@ class Contract(unittest.TestCase):
         stale = source.index('"stale_moved_click"')
         self.assertLess(refresh, stale)
 
+    def test_current_links_are_resolved_in_frozen_intent_order(self):
+        intents = [
+            {"target_id": "INV-0", "destination": "http://x/INV-0"},
+            {"target_id": "INV-1", "destination": "http://x/INV-1"},
+        ]
+        receipt = {"state": {"links": [
+            {"id": "INV-1", "href": "http://x/INV-1"},
+            {"id": "INV-0", "href": "http://x/INV-0"},
+        ]}}
+        self.assertEqual([row["id"] for row in
+                          B._ordered_intent_links(receipt, intents)],
+                         ["INV-0", "INV-1"])
+        with self.assertRaises(B.ContractError):
+            B._ordered_intent_links(
+                {"state": {"links": [receipt["state"]["links"][1]]}}, intents)
+
     def test_candidate_cli_cannot_be_the_production_verifier(self):
         source = (ROOT / "computerbench.py").read_text(encoding="utf-8")
         for forbidden in ("def assess_acceptance", "class _OwnerBackend",
@@ -970,9 +1009,10 @@ class Contract(unittest.TestCase):
             dict(base, actions=[{"state": "PREPARED"}], action_attempted=True),
             dict(base, actions=[{"state": "DISPATCHED"}], action_attempted=True),
             dict(base, actions=[{"state": "UNKNOWN"}], action_attempted=True),
+            dict(base, actions=[{"state": "FAILED_POSTCONDITION"}],
+                 action_attempted=True),
             dict(base, actions=[{"state": "invented"}], action_attempted=True),
             dict(base, action_read_error="denied"),
-            dict(base, action_attempted=True),
             dict(base, controller_outcome="completed",
                  artifact_outcome="verified", action_attempted=True,
                  actions=[{"state": "VERIFIED"}, {"state": "UNKNOWN"}]),
@@ -980,11 +1020,19 @@ class Contract(unittest.TestCase):
         for row in corruptions:
             self.assertEqual(B._development_status(row), "unresolved", row)
         self.assertEqual(B._development_status(dict(
-            base, action_attempted=True, actions=[{"state": "REFUSED"}])),
+            base, action_attempted=True,
+            actions=[{"state": "REFUSED", "operation": "click"}])),
+            "safe_refusal")
+        self.assertEqual(B._development_status(dict(
+            base, artifact_outcome="verified", action_attempted=True)),
             "safe_refusal")
         self.assertEqual(B._development_status(dict(
             base, controller_outcome="completed", artifact_outcome="verified",
-            action_attempted=True, actions=[{"state": "VERIFIED"}])),
+            action_attempted=True,
+            postcondition_completion={"passed": True},
+            actions=[{"state": "REFUSED", "operation": "click"},
+                     {"state": "VERIFIED", "operation": "click",
+                      "required_for_task": True}])),
             "verified_completion")
 
     def test_candidate_cli_exit_requires_selected_development_gate(self):

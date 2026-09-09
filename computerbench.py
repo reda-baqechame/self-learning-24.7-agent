@@ -26,7 +26,7 @@ PLAYWRIGHT_IMAGE = ("mcr.microsoft.com/playwright/mcp@sha256:"
                     "add8756264bc95962597d2e5095b66317acb1d89a7c8b64f264e7d2dee140bc9")
 PORTAL_ORIGIN = "http://127.0.0.1:8765"
 PORTAL_FIXTURE_REL = "tests/computerbench-portal-fixture/server.cjs"
-PORTAL_FIXTURE_SHA256 = "a2528e5f3e57d472a4e37d8317661a07a8148ac9b6998f643f59a713a7b5f5c2"
+PORTAL_FIXTURE_SHA256 = "a2439e64c586860161fc289f09450978bc60cc8c48fb199a5efdde695d773eff"
 DEVELOPMENT_EXPECTED = {
     "normal": "verified_completion",
     "delayed": "verified_completion",
@@ -60,12 +60,15 @@ def invoice_manifest():
     for index in range(3):
         identity = "INV-" + str(index)
         raw = json.dumps({"id": identity, "month": "2026-08",
+                          "account": "fixture-owner@example.invalid",
                           "total_cents": 1200 + index},
                          separators=(",", ":")).encode("utf-8")
         rows.append({"id": identity, "file": identity + ".json",
                      "bytes": len(raw),
-                     "sha256": hashlib.sha256(raw).hexdigest()})
-    return {"month": "2026-08", "invoices": rows}
+                     "sha256": hashlib.sha256(raw).hexdigest(),
+                     "total_cents": 1200 + index})
+    return {"month": "2026-08", "account": "fixture-owner@example.invalid",
+            "invoices": rows}
 
 
 def portal_spec(docker, output_dir):
@@ -131,6 +134,7 @@ def _write_json(path, value):
 def _source_hashes(spec):
     home = Path(__file__).resolve().parent
     names = ("computerbench.py", "computersession.py", "computeruse.py",
+             "computerverify.py",
              "computerprocess.py", "mcp.py", PORTAL_FIXTURE_REL)
     hashes = {name: hashlib.sha256((home / name).read_bytes()).hexdigest()
               for name in names}
@@ -163,6 +167,29 @@ def receipt_state_changed(before, after):
     """Compare sealed observation identities, not timing or page wording."""
     return (before["observation"]["state_sha256"]
             != after["observation"]["state_sha256"])
+
+
+def _ordered_intent_links(receipt, intents):
+    """Resolve the current links in caller-frozen intent order."""
+    try:
+        links = receipt["state"]["links"]
+    except (KeyError, TypeError) as error:
+        raise ContractError("current receipt has no link state") from error
+    if (not isinstance(links, list)
+            or any(not isinstance(link, dict)
+                   or not isinstance(link.get("id"), str)
+                   or not isinstance(link.get("href"), str)
+                   for link in links)):
+        raise ContractError("current receipt link state is malformed")
+    ordered = []
+    for intent in intents:
+        matches = [link for link in links
+                   if link["id"] == intent["target_id"]
+                   and link["href"] == intent["destination"]]
+        if len(matches) != 1:
+            raise ContractError("current receipt does not uniquely satisfy frozen intent")
+        ordered.append(matches[0])
+    return ordered
 
 
 def _environment(session, seen):
@@ -292,27 +319,46 @@ def _development_status(record):
     attempted = record.get("action_attempted")
     if (type(attempted) is not bool or not isinstance(actions, list)
             or any(not isinstance(action, dict)
-                   or action.get("state") not in ("VERIFIED", "REFUSED")
-                   for action in actions)
-            or (attempted and not actions) or (not attempted and actions)):
+                   or action.get("operation") not in ("open", "click")
+                   or action.get("state") not in ("VERIFIED", "REFUSED",
+                                                   "FAILED_WITH_KNOWN_NO_EFFECT",
+                                                   "FAILED_POSTCONDITION")
+                   for action in actions)):
         return "unresolved"
+    clicks = [action for action in actions if action.get("operation") == "click"]
+    required_clicks = [action for action in clicks
+                       if action.get("required_for_task") is True]
     outcome = record.get("controller_outcome")
+    failed_postcondition = any(action["state"] == "FAILED_POSTCONDITION"
+                               for action in clicks)
+    if failed_postcondition:
+        return "rejected_artifacts" if record["artifact_outcome"] == "rejected" \
+            and outcome == "refused" else "unresolved"
     if (outcome not in ("completed", "refused")
             or (outcome == "completed"
                 and (not attempted
-                     or not any(action["state"] == "VERIFIED"
-                                for action in actions)))
+                     or not required_clicks
+                     or not all(action["state"] == "VERIFIED"
+                                for action in required_clicks)
+                     or any(action["state"] not in
+                            ("VERIFIED", "REFUSED",
+                             "FAILED_WITH_KNOWN_NO_EFFECT")
+                            for action in clicks)
+                     or record.get("postcondition_completion", {}).get("passed")
+                        is not True))
             or (outcome == "refused"
-                and any(action["state"] != "REFUSED" for action in actions))):
+                and any(action["state"] not in
+                        ("REFUSED", "FAILED_WITH_KNOWN_NO_EFFECT")
+                        for action in clicks))):
         return "unresolved"
+    if outcome == "refused":
+        return "safe_refusal"
     if record["artifact_outcome"] == "verified":
         if outcome == "completed":
             return "verified_completion"
         return "unresolved"
     if outcome == "completed":
         return "rejected_artifacts"
-    if outcome == "refused":
-        return "safe_refusal"
     return "unresolved"
 
 
@@ -321,6 +367,7 @@ def run_development_trial(case, repeat, trial_root, docker):
     import computerprocess
     import computersession
     import computeruse
+    import computerverify
     import mcp
     import org
 
@@ -329,8 +376,9 @@ def run_development_trial(case, repeat, trial_root, docker):
     started = time.monotonic()
     root = Path(trial_root)
     root.mkdir(parents=True, exist_ok=False)
-    output = root / "output"
-    output.mkdir()
+    output_rel = "effects/computer/artifacts"
+    output = root / output_rel
+    output.mkdir(parents=True)
     org.create(os.fspath(root), "Synthetic ComputerBench portal",
                "fixture-owner@example.invalid")
     org.set_policy(os.fspath(root), "fixture-owner@example.invalid",
@@ -343,6 +391,7 @@ def run_development_trial(case, repeat, trial_root, docker):
               "artifact_outcome": "not_run", "provider_calls": 0,
               "action_attempted": False,
               "receipts": [], "timing": [], "environments": [],
+              "verification_receipts": [],
               "acceptance_complete": False, "release_ready": False,
               "scope": "known deterministic synthetic development fixture",
               "source_hashes": _source_hashes(spec),
@@ -355,6 +404,17 @@ def run_development_trial(case, repeat, trial_root, docker):
     sessions = []
     current = None
     receipt = None
+    workflow = None
+    expected = invoice_manifest()
+    expected_digest = computerverify.canonical_digest(expected)
+    expectation_source = {
+        "identity": "computerbench.synthetic-owner-manifest",
+        "version": "2026-08-v1", "sha256": expected_digest}
+    intents = [{"target_id": "INV-" + str(index),
+                "invoice_id": "INV-" + str(index),
+                "destination": PORTAL_ORIGIN + "/invoice/INV-" + str(index)
+                               + "?case=" + case}
+               for index in range(3)]
     try:
         current = computersession.ComputerSession(
             os.fspath(root), task, "portal", "computerbench-dev-v1")
@@ -401,10 +461,17 @@ def run_development_trial(case, repeat, trial_root, docker):
                 state = receipt["state"]
             if state["dialog"] or state["expired"]:
                 if state["links"]:
+                    workflow = current.freeze_invoice_workflow(
+                        output_rel, expected, expectation_source,
+                        expected["account"], intents, deadline_seconds=30)
                     record["action_attempted"] = True
                     _timed(record, "blocked_click",
-                           lambda: current.click(receipt, state["links"][0]["id"]))
+                           lambda: current.click(receipt, state["links"][0]["id"],
+                                                 workflow_id=workflow["workflow_id"]))
                 raise computeruse.Refused("dialog or authentication state blocked retrieval")
+            workflow = current.freeze_invoice_workflow(
+                output_rel, expected, expectation_source, expected["account"],
+                intents, deadline_seconds=30)
             if case == "moved":
                 old = receipt
                 time.sleep(.35)
@@ -422,15 +489,28 @@ def run_development_trial(case, repeat, trial_root, docker):
                 else:
                     record["moved_receipt_refused"] = (
                         "not exercised: movement preceded the first sealed receipt")
-            for link in list(receipt["state"]["links"]):
+            planned = _ordered_intent_links(receipt, intents)
+            for position, link in enumerate(planned):
+                if position:
+                    reopened = _timed(record, "reopen-" + link["id"],
+                                      lambda: current.open(
+                                          PORTAL_ORIGIN + "/?case=" + case))
+                    receipt = _remember_receipt(
+                        record, "reopen-" + link["id"], reopened["observation"])
                 record["action_attempted"] = True
                 fresh = _remember_receipt(record, "pre-click-" + link["id"],
                                           _timed(record, "observe", current.observe))
                 clicked = _timed(record, "click-" + link["id"],
                                  lambda link=link, fresh=fresh:
-                                 current.click(fresh, link["id"]))
+                                 current.click(fresh, link["id"],
+                                               workflow_id=workflow["workflow_id"]))
                 _remember_receipt(record, "post-click-" + link["id"],
                                   clicked["observation"])
+                verified = _timed(
+                    record, "verify-" + link["id"],
+                    lambda clicked=clicked: current.verify_invoice_action(
+                        clicked["action_id"], workflow["workflow_id"]))
+                record["verification_receipts"].append(verified)
             record["controller_outcome"] = "completed"
     except computeruse.Refused as error:
         record["controller_outcome"] = "refused"
@@ -473,17 +553,16 @@ def run_development_trial(case, repeat, trial_root, docker):
         record["actions"] = None
         record["action_read_error"] = str(error)[:300]
 
-    expected = invoice_manifest()
-    expected_digest = computeruse.digest_manifest(expected)
     record["expected_manifest"] = expected
     record["expected_manifest_sha256"] = expected_digest
-    try:
-        record["verification"] = computeruse.verify_invoices(
-            os.fspath(root), "output", expected, expected_digest)
-        record["artifact_outcome"] = "verified"
-    except (ValueError, OSError) as error:
-        record["artifact_outcome"] = "rejected"
-        record["verification_reason"] = str(error)[:500]
+    passed, why = computerverify.completion_status(os.fspath(root), task)
+    record["postcondition_completion"] = {"passed": passed, "reason": why}
+    record["verification"] = {"status": "VERIFIED_ARTIFACTS",
+                              "manifest_sha256": expected_digest,
+                              "receipts": list(record["verification_receipts"]),
+                              "release_ready": False} if passed else None
+    record["artifact_outcome"] = "verified" if passed else "rejected"
+    if not passed: record["verification_reason"] = why[:500]
     try:
         record["artifact_manifest"], record["duplicate_invoice_ids"] = \
             _artifact_manifest(output)

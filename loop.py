@@ -1870,8 +1870,17 @@ class Agent:
         """
         cmd = task.get("done_check")
         vname = task.get("verifier")
+        # CU-1 runs before the historical no-gate success path. A model cannot
+        # finish around a dispatched/UNKNOWN click merely because the task had
+        # no shell or named verifier gate.
+        import computerverify as _computerverify
+        computer_ok,computer_evidence=_computerverify.completion_status(
+            self.root,task)
+        if not computer_ok:
+            return False,"computer postcondition: "+computer_evidence
         if not cmd and not vname:
-            return True, ""
+            return True,("" if computer_evidence=='no computer history' else
+                         "computer postcondition: "+computer_evidence)
         l0_ok, verifier_line = True, ""
         if vname:
             # A TRUSTED VERIFIER'S VERDICT IS L0: pure predicate observation
@@ -1910,6 +1919,9 @@ class Agent:
                 l0_evidence = f"{verifier_line}\n{l0_evidence}"
         else:
             l0_evidence = verifier_line
+        if computer_evidence!='no computer history':
+            l0_evidence=("computer postcondition: "+computer_evidence+
+                         ("\n"+l0_evidence if l0_evidence else ""))
         try:
             import verification
             report = verification.run(self, task, (l0_ok, l0_evidence))

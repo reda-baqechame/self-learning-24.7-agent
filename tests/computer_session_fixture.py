@@ -27,6 +27,22 @@ def state():
             'links':[{'id':name, 'href':'https://example.com/'+name,
                       'text':name, 'box':{'x':1,'y':1,'width':20,'height':10}}
                      for name in ('one','two')]}
+def invoice_effect(target):
+    """Controlled executor output for CU-1 tests; never verifier evidence."""
+    config = root/'invoice-work.json'
+    if not config.exists():
+        return
+    work = json.loads(config.read_text(encoding='utf-8'))
+    if target in work.get('no_op',[]):
+        return
+    output = root/work.get('output_dir','output'); output.mkdir(parents=True,exist_ok=True)
+    rows = work['targets']
+    selected = [target]
+    if target in work.get('create_future',{}):
+        selected += list(work['create_future'][target])
+    for name in selected:
+        row = rows[name]
+        (output/row['file']).write_text(json.dumps(row['content'],separators=(',',':')),encoding='utf-8')
 try:
     for line in sys.stdin:
         msg = json.loads(line)
@@ -54,6 +70,7 @@ try:
                         reply(mid,{'content':[{'type':'text','text':'### Result\n'+json.dumps({'refused':'viewport changed'})}]})
                         continue
                     (root/'effect-seen').write_text(p['target']['id'])
+                    invoice_effect(p['target']['id'])
                     if (root/'hold-response').exists():
                         continue
                     data = {'status':'ACTION_DISPATCHED','clicked':True,
