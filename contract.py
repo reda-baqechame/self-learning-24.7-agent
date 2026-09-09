@@ -76,7 +76,9 @@ blocker may resume it to running.
 import argparse
 import hashlib
 import json
+import math
 import os
+import re
 import sys
 import threading
 import time
@@ -107,10 +109,83 @@ class ContractError(Exception):
     pass
 
 
+def validate_goal_id(value):
+    """Return one path-safe contract id, or refuse before touching disk."""
+    if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):
+        raise ContractError(
+            "goal id must start with an ASCII letter or number and contain "
+            "only letters, numbers, '.', '_' or '-' (64 characters maximum)")
+    return value
+
+
+def validate_goal_text(value):
+    """Return a non-empty owner goal without accepting typed lookalikes."""
+    if not isinstance(value, str) or not value.strip():
+        raise ContractError("goal must be a non-empty string")
+    return value.strip()
+
+
+def validate_budget_limit(value, name, *, whole=False, positive=False):
+    """Return one canonical limit or refuse it before contract state exists.
+
+    JSON, CLI and direct Python callers all arrive here. ``float('nan')`` and
+    infinity compare strangely enough to bypass ordinary range checks, while
+    bool is an int in Python; both are invalid owner limits.
+    """
+    if value is None or isinstance(value, bool):
+        raise ContractError(f"{name} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ContractError(f"{name} must be a number") from None
+    if not math.isfinite(number):
+        raise ContractError(f"{name} must be finite")
+    if whole and not number.is_integer():
+        raise ContractError(f"{name} must be a whole number")
+    if number < 0 or (positive and number <= 0):
+        qualifier = "greater than zero" if positive else "zero or greater"
+        raise ContractError(f"{name} must be {qualifier}")
+    return int(number) if whole else number
+
+
+def validate_acceptance(accept):
+    """Validate and copy the frozen graders before any contract write."""
+    if accept is None:
+        return []
+    if not isinstance(accept, (list, tuple)):
+        raise ContractError("acceptance must be a list")
+    if len(accept) > MAX_ACCEPT:
+        raise ContractError(
+            f"{len(accept)} acceptance tests; more than {MAX_ACCEPT} means "
+            f"this is several goals wearing one id — split it")
+    out, ids = [], set()
+    for i, a in enumerate(accept, 1):
+        if not isinstance(a, dict):
+            raise ContractError(f"malformed acceptance entry: {a!r}")
+        aid, what, check = a.get("id"), a.get("what"), a.get("check")
+        if not isinstance(aid, str) or not aid.strip():
+            raise ContractError(f"acceptance {i} needs a non-empty string id")
+        if aid in ids:
+            raise ContractError(f"duplicate acceptance id: {aid!r}")
+        if not isinstance(what, str) or not what.strip():
+            raise ContractError(f"acceptance {aid} needs a stated criterion")
+        if not isinstance(check, str) or not check.strip():
+            raise ContractError(f"acceptance {aid} needs a command string")
+        if "group" in a:
+            group = a["group"]
+            if not isinstance(group, str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", group):
+                raise ContractError(f"acceptance {aid} has an invalid group")
+        ids.add(aid)
+        out.append(dict(a))
+    return out
+
+
 # ------------------------------------------------------------------- paths
 
 def _dir(root, gid):
-    return os.path.join(root, "goals", str(gid))
+    return os.path.join(root, "goals", validate_goal_id(gid))
 
 
 def path(root, gid):
@@ -257,31 +332,30 @@ def parse_accept(items):
 
 
 def create(root, gid, goal, criteria="", accept=None, non_goals="",
-           max_usd=0.0, max_minutes=0, max_cycles=4):
+            max_usd=0.0, max_minutes=0, max_cycles=4):
     """Write the contract, in `draft`. Freezing is a separate, explicit act
     so a caller can review what is about to become the definition of done."""
-    accept = list(accept or [])
-    if len(accept) > MAX_ACCEPT:
-        raise ContractError(
-            f"{len(accept)} acceptance tests; more than {MAX_ACCEPT} means "
-            f"this is several goals wearing one id — split it")
-    for a in accept:
-        if not isinstance(a, dict) or not a.get("check"):
-            raise ContractError(f"malformed acceptance entry: {a!r}")
+    gid = validate_goal_id(gid)
+    goal = validate_goal_text(goal)
+    accept = validate_acceptance(accept)
+    max_usd = validate_budget_limit(max_usd, "max_usd")
+    max_minutes = validate_budget_limit(max_minutes, "max_minutes", whole=True)
+    max_cycles = validate_budget_limit(max_cycles, "max_cycles", whole=True,
+                                       positive=True)
     c = {
-        "gid": str(gid), "version": 1,
-        "goal": str(goal), "criteria": str(criteria or ""),
+        "gid": gid, "version": 1,
+        "goal": goal, "criteria": str(criteria or ""),
         "non_goals": str(non_goals or ""),
         "acceptance": accept,
-        "budget": {"max_usd": float(max_usd or 0.0),
-                   "max_minutes": int(max_minutes or 0),
-                   "max_cycles": int(max_cycles or 4)},
+        "budget": {"max_usd": max_usd,
+                   "max_minutes": max_minutes,
+                   "max_cycles": max_cycles},
         "state": "draft", "state_why": "",
         "accept_hash": None, "sealed": None,
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     _write(root, gid, c)
-    event(root, gid, "contract_created", goal=str(goal)[:200],
+    event(root, gid, "contract_created", goal=goal[:200],
           acceptance=len(accept), max_usd=c["budget"]["max_usd"],
           max_minutes=c["budget"]["max_minutes"], max_cycles=max_cycles)
     return c

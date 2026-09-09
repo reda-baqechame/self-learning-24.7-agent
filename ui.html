@@ -435,7 +435,7 @@ const COMMANDS = [
   ["Give someone a panel token", "admin", "dlgInvite()", "python org.py token <email> --as you@example.com", "token access rbac member login"],
   ["How should it choose a model?", "admin", "openModelPolicy()", "python modelrouter.py", "policy cheapest balanced quality model routing"],
   ["Plan what to study first", "resources", "S.resTab='knowledge';go('resources')", "python curriculum.py --root experts/<slug> --course <c> --plan", "curriculum study order lessons"],
-  ["Open an agent's goal cockpit", "work", "S.sub='goals';go('agents')", "python contract.py show experts/<slug> <goal-id>", "cockpit pursuit contract graders ledger steering budget"],
+  ["Open an agent's goal cockpit", "work", "openAgentAction('goals')", "python contract.py show experts/<slug> <goal-id>", "cockpit pursuit contract graders ledger steering budget"],
   ["Steer a running pursuit", "work", "S.sub='goals';go('agents')", "python steer.py add experts/<slug> <goal-id> \"guidance\"", "steer guide advise course correct nudge"],
   ["See the knowledge graph", "resources", "S.sub='graph';go('agents')", "python knowledge.py summary experts/<slug>", "graph entities edges atoms memory map visualize"],
   ["Mastery — sealed exams and scores", "resources", "S.sub='mastery';go('agents')", "python mastery.py status <home> <expert> <pack>", "mastery capability pack exam competence transfer retention verdict"],
@@ -595,41 +595,79 @@ function renderNav(){
    The hash mirrors state one-way on navigation; on load (and back/forward)
    it is applied before the first render, so a pasted link opens exactly
    the screen the sender was looking at. */
+function routeHash(){
+  if(S.view==="mission" && S.missionExpert && S.missionId)
+    return "#mission/"+encodeURIComponent(S.missionExpert)+"/"+
+      encodeURIComponent(S.missionId);
+  if(S.sel) return "#agent/"+encodeURIComponent(S.sel)+"/"+(S.sub||"ov")+
+    (S.sub==="goals"&&S.goalSel?"/"+encodeURIComponent(S.goalSel):"");
+  const tab = S.view==="resources" ? S.resTab :
+    (S.view==="proof" ? S.proofTab : (S.view==="admin" ? S.adminTab : null));
+  return "#"+(S.view||"home")+(tab?"/"+encodeURIComponent(tab):"");
+}
 function syncHash(){
-  const h = S.sel
-    ? "#agent/" + encodeURIComponent(S.sel) + "/" + (S.sub || "ov")
-      + (S.sub === "goals" && S.goalSel ? "/" + encodeURIComponent(S.goalSel) : "")
-    : "#" + (S.view || "home")
-      + (S.view === "resources" && S.resTab ? "/" + S.resTab : "");
+  const h=routeHash();
   if (location.hash !== h){
-    try{ history.replaceState(null, "", h); }catch(e){}
+    try{
+      if(S.routeReady) history.pushState(null, "", h);
+      else history.replaceState(null, "", h);
+    }catch(e){}
   }
+  S.routeReady=true;
+}
+function safeRoutePart(value){
+  try{return decodeURIComponent(value||"");}catch(e){return "";}
 }
 function applyHash(){
   const p = location.hash.replace(/^#/, "").split("/").filter(Boolean);
   if (!p.length) return;
-  if (p[0] === "agent" && p[1]){
-    S.view = "agents"; S.sel = decodeURIComponent(p[1]);
+  const view=safeRoutePart(p[0]);
+  if (view === "agent" && p[1]){
+    const slug=safeRoutePart(p[1]);
+    if(!/^[a-z0-9-]+$/.test(slug)){S.view="home";S.sel=null;return;}
+    S.view = "agents"; S.sel = slug;
     S.sub = p[2] || "ov";
-    S.goalSel = (S.sub === "goals" && p[3]) ? decodeURIComponent(p[3]) : null;
-  } else if (/^[a-z]+$/.test(p[0])){
-    S.view = p[0]; S.sel = null;
-    // #resources/frontier lands on a TAB, not just the section. The tabs
-    // were reachable only by clicking, so a link to "the capabilities this
-    // fleet obtained" could not be sent to anybody.
-    if (p[0] === "resources" && p[1] && /^[a-z]+$/.test(p[1])) S.resTab = p[1];
+    S.goalSel = (S.sub === "goals" && p[3]) ? safeRoutePart(p[3]) : null;
+  } else if(view==="mission" && p[1] && p[2]){
+    const slug=safeRoutePart(p[1]), mid=safeRoutePart(p[2]);
+    if(/^[a-z0-9-]+$/.test(slug) && /^m-[A-Za-z0-9-]+$/.test(mid)){
+      S.view="mission";S.sel=null;S.missionExpert=slug;S.missionId=mid;
+    }else{S.view="home";S.sel=null;}
+  } else if (["home","work","agents","resources","proof","admin",
+              "guide","memory","models","system"].includes(view)){
+    S.view=view; S.sel=null;
+    const tab=safeRoutePart(p[1]);
+    const tabs={resources:["computers","tools","skills","knowledge","frontier"],
+      proof:["platform","work"],admin:["health","models","metrics","access"]};
+    if(tab && (tabs[view]||[]).includes(tab)) S[view==="resources"?"resTab":
+      (view==="proof"?"proofTab":"adminTab")]=tab;
+  } else {
+    S.view="home";S.sel=null;
   }
 }
-window.addEventListener("hashchange", ()=>{ applyHash(); render(); });
+let routeTimer=null;
+function routeChanged(){
+  clearTimeout(routeTimer);
+  routeTimer=setTimeout(()=>{applyHash();render();},0);
+}
+window.addEventListener("hashchange", routeChanged);
+window.addEventListener("popstate", routeChanged);
 function go(view){ S.view=view; S.sel=null; closeCmd(); render(); }
 /* The model policy lives on ONE agent's Advanced tab, because that is where
    it takes effect. From the palette there may be no agent selected, so pick
    the first one rather than opening a page about nobody. */
 function openModelPolicy(){
-  const slug = S.sel || (((S.sys&&S.sys.experts)||[])[0]||{}).name;
-  if (!slug){ toast("create an agent first"); go("agents"); return; }
+  const experts=((S.sys&&S.sys.experts)||[]);
+  const slug=S.sel||(experts.length===1?experts[0].name:null);
+  if (!slug){ toast(experts.length?"choose which agent":"create an agent first"); go("agents"); return; }
   S.advTab = "wiring";
   openAgent(slug, "identity");
+}
+function openAgentAction(sub){
+  const experts=((S.sys&&S.sys.experts)||[]);
+  const slug=S.sel||(experts.length===1?experts[0].name:null);
+  if(!slug){toast(experts.length?"choose which agent":"create an agent first");go("agents");return;}
+  openAgent(slug,sub);
 }
 function openAgent(slug, sub){ S.view="agents"; S.sel=slug;
   if(sub) S.sub=sub; S.mindPath=null; render(); }
@@ -1183,7 +1221,7 @@ function dlgMission(prefill){
     <p class="muted" style="font-size:12px">The objective cannot be edited later
     to match whatever was achieved — amending it is recorded, fingerprinted and
     visible on the mission page.</p>`,
-    [["Cancel","closeDlg()","ghost"],["Start the mission","doMission()","pri"]]);
+    [["Cancel","closeDlg()","ghost"],["Save mission contract","doMission()","pri"]]);
 }
 async function doMission(){
   const v=id=>{const e=document.getElementById(id);return e?e.value.trim():"";};
@@ -1198,10 +1236,10 @@ async function doMission(){
     expert: v("msExp")}});
   if (r && r.mission){
     closeDlg();
-    toast(`mission started — ${r.criteria} criteria, contract ${r.fingerprint}`);
+    toast(`mission saved — ${r.criteria} criteria, contract ${r.fingerprint}`);
     openMission(v("msExp"), r.mission);
   } else {
-    toast((r&&r.error)||"could not start the mission");
+    toast((r&&r.error)||"could not save the mission");
   }
 }
 
@@ -1296,11 +1334,11 @@ function renderGuide(m){
   <div class="card"><h3>1b · Five ways to create an agent (Agents → ＋ New agent)</h3><div class="body">
     <div class="tablewrap"><table>
       <tr><th>lane</th><th>you give</th><th>you get</th><th>honest bar</th></tr>
-      <tr><td>🎓 Trained expert</td><td>courses — videos, books, folders, links</td><td>cited notes, proven skills, exam-verified mastery</td><td>99–100% on what it studied</td></tr>
-      <tr><td>⚡ Quick specialist</td><td>speciality + kind + your prompt + goal + briefing files</td><td>a working agent in seconds, tools chosen for its kind</td><td>95–99%</td></tr>
-      <tr><td>🧬 From an archetype</td><td>a name + one of 24 charters</td><td>Chief of Staff, Deep Researcher, Nightwatch Optimizer, Privacy Warden, Scout, Critic, TradeOps, Local Radar… boundaries included</td><td>95–99%</td></tr>
-      <tr><td>📚 Learner</td><td>a topic (+ optional sources)</td><td>an expert AND a running study goal that cycles until the exam clears</td><td>climbs toward trained</td></tr>
-      <tr><td>🤝 Team</td><td>2–4 existing agents + a lead + a goal</td><td>a decomposed, file-handoff collaboration with constraint digests</td><td>the members' bars</td></tr>
+      <tr><td>🎓 Trained expert</td><td>courses — videos, books, folders, links</td><td>cited notes, proven skills, exam-verified mastery</td><td>its cited notes, checks and closed-book exam record</td></tr>
+      <tr><td>⚡ Quick specialist</td><td>speciality + kind + your prompt + goal + briefing files</td><td>a working agent in seconds, tools chosen for its kind</td><td>the gate and evidence recorded for each task</td></tr>
+      <tr><td>🧬 From an archetype</td><td>a name + one of 24 charters</td><td>Chief of Staff, Deep Researcher, Nightwatch Optimizer, Privacy Warden, Scout, Critic, TradeOps, Local Radar… boundaries included</td><td>the gate and evidence recorded for each task</td></tr>
+      <tr><td>📚 Learner</td><td>a topic (+ optional sources)</td><td>an expert AND a running study goal that cycles until the exam clears</td><td>the same notes, checks and exam record</td></tr>
+      <tr><td>🤝 Team</td><td>2–4 existing agents + a lead + a goal</td><td>a decomposed, file-handoff collaboration with constraint digests</td><td>each member's recorded task evidence</td></tr>
     </table></div>
   </div></div>
   <div class="card"><h3>2 · Create → Teach → Watch</h3><div class="body">
@@ -1330,7 +1368,7 @@ function renderGuide(m){
         ends VERIFIED with zero model calls. Otherwise: plan → gated work → judge
         (different model family) → the judge itself is re-checked and <b>overruled if
         it lies</b> → repair from recorded errors → re-plan, within budget. Give it
-        graders (<span class="mono">what::command</span>) or it caps at "achieved".
+        named gates from the catalogue or its honest ceiling is PARTIAL.
         Mid-flight, the cockpit's <b>steering box</b> guides the next cycle — advice
         on the ledger, never a grader.</td></tr>
       <tr><td><b>Mission</b></td><td>Home bar → New mission</td>
@@ -1537,8 +1575,8 @@ async function showManifest(slug){
     Memory → Search.</p>`);
 }
 const LANES = [
-  ["trained","🎓","Trained expert","Feed it whole courses; it studies into cited notes, proves skills, sits closed-book exams. Deepest bar — 99–100%.","dlgCreate()"],
-  ["quick","⚡","Quick specialist","Name + speciality + kind + your system prompt + first goal. Working in seconds; picks its own tools. 95–99%.","dlgQuick()"],
+  ["trained","🎓","Trained expert","Feed it whole courses; it studies into cited notes, proves skills, and sits closed-book exams. Inspect those records for the capability you need.","dlgCreate()"],
+  ["quick","⚡","Quick specialist","Name + speciality + kind + your system prompt + first goal. Working in seconds; each task still needs its own gate and evidence.","dlgQuick()"],
   ["archetype","🧬","From an archetype","24 crafted charters — Chief of Staff, Deep Researcher, Nightwatch Optimizer, Privacy Warden, Scout, Critic, TradeOps, Local Radar… with authority boundaries built in.","dlgArchetype()"],
   ["learner","📚","Learner — give it a topic","Creates the expert AND launches the study goal: gather → cited notes → memcheck → self-exam → re-study what it missed, until mastery.","dlgLearner()"],
   ["team","🤝","Team of specialists","Pick 2–4 existing agents and a lead; the lead splits the goal by who is trained for what; handoffs are files, constraints are hashed.","closeDlg();go('work')"],
@@ -1929,8 +1967,8 @@ function dlgQuick(){
     <p class="muted" style="font-size:12.5px">On create it scans this machine&#39;s toolbox
     and picks the right tools &amp; role for the kind. Next screen: drop briefing
     files/images — they become grounded memory instantly and outrank its general
-    knowledge. Same harness and done-gates as trained experts; one layer fewer (no
-    exams) — that is the honest 95–99% vs 99–100% difference.</p>`,
+    knowledge. It uses the same harness and task gates as trained experts, but it
+    has no course exam record. Inspect the gate and evidence for the task at hand.</p>`,
     [["Cancel","closeDlg()","ghost"],["⚡ Spin it up","doQuick()","pri"]]);
 }
 async function doQuick(){
@@ -3893,14 +3931,19 @@ async function renderWork(m){
     <select class="field" id="gExp">${experts.map(e=>`<option>${esc(e)}</option>`).join("")}</select>
     <label class="lb">The goal</label>
     <textarea class="field" id="gGoal" placeholder="e.g. Learn WCAG 2.2 AA and rebuild pricing.html to pass it — or: learn everything in course X to mastery"></textarea>
-    <label class="lb">Definition of done — the graders (one per line, optional but decisive)</label>
-    <textarea class="field" id="gAccept" rows="2" style="font-family:var(--mono,monospace);font-size:11.5px"
-      placeholder="report exists::python -c &quot;import os,sys;sys.exit(0 if os.path.exists('out/report.md') else 1)&quot;"></textarea>
-    <div class="row" style="margin-top:6px">
-      <input class="field" id="gBudget" placeholder="max $ (e.g. 1.00)" style="max-width:140px">
-      <span class="muted" style="font-size:11.5px">each line is <span class="mono">what::command</span> —
-      frozen &amp; sealed before planning, run only by the harness. With graders a goal can end
-      <b>VERIFIED</b>; without them it caps at "achieved" (a judged opinion).</span></div>
+    <label class="lb">Definition of done — named gates (optional but decisive)</label>
+    <div id="gGateRows">${goalGateRow()}</div>
+    <button class="btn sm ghost" type="button" onclick="addGoalGate()">＋ another gate</button>
+    <p class="muted" style="font-size:11.5px">Choose a check the harness owns;
+      browser requests cannot author shell commands. Gates are frozen and sealed
+      before planning. With gates a goal can end <b>VERIFIED</b>; without them it
+      can only end partial, with the missing proof named.</p>
+    <div class="row" style="margin-top:6px;align-items:flex-start;flex-wrap:wrap">
+      <input class="field" id="gBudget" inputmode="decimal" placeholder="max $ (0 = no extra cap)" style="max-width:180px">
+      <input class="field" id="gMinutes" inputmode="numeric" placeholder="max minutes (0 = no extra cap)" style="max-width:210px">
+      <input class="field" id="gCycles" inputmode="numeric" value="4" aria-label="maximum cycles" style="max-width:100px">
+      <span class="muted" style="font-size:11.5px">Zero adds no goal-level cap;
+      daily, task, provider and runtime limits still apply.</span></div>
     <div class="row" style="margin-top:10px">
       <button class="btn pri" onclick="startGoal()">pursue it</button>
       <span class="muted" style="font-size:12px">machine path first (zero tokens) → plan → gated work →
@@ -4037,21 +4080,72 @@ async function loadWorkflows(exp){
       </div></div>`).join("")
    : `<span class="muted">no workflows yet on ${esc(exp)} — run one: draft → review → revise is the classic</span>`;
 }
+function goalGateRow(){
+  return `<div class="row goalGateRow" style="gap:6px;margin:5px 0;flex-wrap:wrap">
+    <select class="field gGate" aria-label="acceptance gate" style="max-width:175px">
+      <option value="">no gate</option>
+      <option value="exists">file exists</option>
+      <option value="designcheck">design check</option>
+      <option value="citecheck">citation check</option>
+      <option value="verify">course checks pass</option>
+      <option value="memcheck">course memory passes</option>
+    </select>
+    <input class="field gGateParam" aria-label="gate path or course" placeholder="relative path or course" style="max-width:230px">
+    <input class="field gGateWhat" aria-label="what this gate proves" placeholder="what this proves (optional)" style="min-width:230px;flex:1">
+    <button class="btn sm ghost" type="button" aria-label="remove gate"
+      onclick="this.closest('.goalGateRow').remove()">remove</button></div>`;
+}
+function addGoalGate(){
+  const box=document.getElementById("gGateRows");
+  if(box) box.insertAdjacentHTML("beforeend", goalGateRow());
+}
+function collectGoalAcceptance(){
+  const out=[];
+  for(const row of document.querySelectorAll("#gGateRows .goalGateRow")){
+    const gate=row.querySelector(".gGate").value;
+    const param=row.querySelector(".gGateParam").value.trim();
+    const what=row.querySelector(".gGateWhat").value.trim();
+    if(!gate && !param && !what) continue;
+    if(!gate) throw new Error("choose a gate for every definition-of-done row");
+    if(!param) throw new Error("each gate needs its relative path or course");
+    const spec={gate};
+    if(["verify","memcheck"].includes(gate)) spec.course=param;
+    else spec.path=param;
+    if(what) spec.what=what;
+    out.push(spec);
+  }
+  if(out.length>12) throw new Error("a goal may have at most 12 gates");
+  return out;
+}
+function parseGoalLimit(raw, label, whole, positive, fallback){
+  const text=String(raw==null?"":raw).trim();
+  if(!text) return fallback;
+  const value=Number(text);
+  if(!Number.isFinite(value)) throw new Error(label+" must be a finite number");
+  if(whole && !Number.isInteger(value)) throw new Error(label+" must be a whole number");
+  if(value<0 || (positive && value<=0))
+    throw new Error(label+(positive?" must be greater than zero":" cannot be negative"));
+  return value;
+}
 async function startGoal(){
   const expert=document.getElementById("gExp").value;
   const goalTxt=document.getElementById("gGoal").value.trim();
   if(!goalTxt){toast("write the goal");return;}
-  const accept=(document.getElementById("gAccept")?.value||"").split("\n")
-    .map(s=>s.trim()).filter(Boolean);
-  for (const a of accept){
-    if (!a.includes("::")){ toast(`grader needs what::command — "${a.slice(0,40)}"`); return; }
-  }
-  const max_usd=parseFloat(document.getElementById("gBudget")?.value)||0;
+  let accept,max_usd,max_minutes,cycles;
+  try{
+    accept=collectGoalAcceptance();
+    max_usd=parseGoalLimit(document.getElementById("gBudget")?.value,
+      "max dollars", false, false, 0);
+    max_minutes=parseGoalLimit(document.getElementById("gMinutes")?.value,
+      "max minutes", true, false, 0);
+    cycles=parseGoalLimit(document.getElementById("gCycles")?.value,
+      "cycles", true, true, 4);
+  }catch(e){toast(e.message);return;}
   const r=await api('/api/experts/'+expert+'/goal',{method:"POST",
-    body:{goal:goalTxt, accept, max_usd}});
+    body:{goal:goalTxt, accept, max_usd, max_minutes, cycles}});
   toast(r.error||(accept.length
-    ?`goal started with ${accept.length} frozen grader(s) — it can end VERIFIED`
-    :"goal started — no graders, so it caps at \"achieved\""));
+    ?`goal started with ${accept.length} frozen gate(s) — it can end VERIFIED`
+    :"goal started without mechanical gates — its honest ceiling is partial"));
   setTimeout(render, 800);
 }
 async function startTeam(){
@@ -5139,6 +5233,7 @@ async function renderMission(m){
     m.innerHTML = `<div class="empty">${esc((d&&d.error)||"mission not found")}</div>`;
     return;
   }
+  S.missionState=d;
   const pct = d.criteria_total ? Math.round(100*d.criteria_met/d.criteria_total) : 0;
   m.innerHTML = `
     <button class="btn sm ghost" onclick="go('work')">← Work</button>
@@ -5195,11 +5290,64 @@ async function renderMission(m){
       <span class="kchip"><b>${d.actions}</b>bound actions</span>
       <span class="kchip"><b>${d.amendments}</b>amendments</span>
       <span class="kchip">${esc(d.status)}</span>
+      ${d.complete?"":`<button class="btn pri" onclick="dlgMissionTask()">Queue work for an open criterion</button>`}
     </div>
 
     <details><summary class="muted" style="cursor:pointer">Advanced — the contract
       exactly as the agent sees it, recompiled every iteration</summary>
       <pre class="out">${esc(d.contract||"")}</pre></details>`;
+}
+function dlgMissionTask(){
+  const d=S.missionState||{};
+  const open=d.open||[];
+  if(!open.length){toast("this mission has no open criterion");return;}
+  showDlg("Start criterion-bound mission work", `
+    <p class="muted" style="font-size:12px">This queues one task, binds it to
+    the selected criterion and starts the agent loop. Meeting the criterion
+    still requires recorded evidence.</p>
+    <label class="lb">Open criterion</label>
+    <select class="field" id="mwCriterion">${open.map(c=>
+      `<option value="${esc(c.id)}">${esc(c.id)} — ${esc(c.text)}</option>`).join("")}</select>
+    <label class="lb">Task</label>
+    <textarea class="field" id="mwGoal" placeholder="the concrete work to perform"></textarea>
+    <label class="lb">Expected evidence</label>
+    <input class="field" id="mwEvidence" placeholder="what reviewable artifact or result should exist">
+    <label class="lb">Acceptance gate</label>
+    <div class="row" style="gap:6px;flex-wrap:wrap">
+      <select class="field" id="mwGate" style="max-width:190px">
+        <option value="exists">file exists</option>
+        <option value="designcheck">design check</option>
+        <option value="citecheck">citation check</option>
+        <option value="verify">course checks pass</option>
+        <option value="memcheck">course memory passes</option>
+      </select>
+      <input class="field" id="mwGateParam" placeholder="relative path or course" style="flex:1">
+    </div>
+    <label class="lb">Role</label>
+    <select class="field" id="mwRole">
+      <option value="practitioner">practitioner</option>
+      <option value="consultant">consultant</option>
+      <option value="watcher">watcher</option>
+      <option value="librarian">librarian</option>
+    </select>`,
+    [["Cancel","closeDlg()","ghost"],["Queue and start","doMissionTask()","pri"]]);
+}
+async function doMissionTask(){
+  const value=id=>document.getElementById(id).value.trim();
+  const goal=value("mwGoal"), expected=value("mwEvidence");
+  const gate=value("mwGate"), param=value("mwGateParam");
+  if(!goal){toast("write the concrete task");return;}
+  if(!expected){toast("state the expected evidence");return;}
+  if(!param){toast("the gate needs its relative path or course");return;}
+  const done_check={gate};
+  if(["verify","memcheck"].includes(gate)) done_check.course=param;
+  else done_check.path=param;
+  const r=await api('/api/experts/'+encodeURIComponent(S.missionExpert)+
+    '/mission_task',{method:"POST",body:{mission:S.missionId,
+      criterion:value("mwCriterion"), role:value("mwRole"), goal,
+      expected_evidence:expected, done_check}});
+  if(r&&r.queued){closeDlg();toast("mission task queued and agent loop started");render();}
+  else toast((r&&r.error)||"could not queue mission work");
 }
 /* =================================================================
    BOOT + auto-refresh

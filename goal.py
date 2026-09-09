@@ -131,15 +131,32 @@ def _expert_cfg(root):
 
 def pursue(home, expert, goal, criteria="", cycles=4, drive=False,
            timeout=1800, gid=None, accept=None, max_usd=0.0, max_minutes=0):
+    if not isinstance(expert, str) or not re.fullmatch(
+            r"[a-z0-9-]{1,64}", expert):
+        raise contractmod.ContractError(
+            "expert must contain 1-64 lowercase letters, numbers or '-'")
     root = os.path.join(home, "experts", expert)
     if not os.path.isdir(root):
         sys.exit(f"ERROR: no expert '{expert}'")
-    gid = gid or time.strftime("g-%Y%m%d-%H%M%S")
-    d = _goal_dir(root, gid)
-    rel_dir = f"goals/{gid}"
-    criteria = criteria.strip() or ("The goal is achieved when a competent "
+    # Validate the full owner contract before _goal_dir writes goal.md,
+    # toolbox.md or any other pursuit artifact. The UI performs the same
+    # checks before spawning this process, but CLI and direct callers enter
+    # here and must receive the same fail-before-write guarantee.
+    goal = contractmod.validate_goal_text(goal)
+    gid = contractmod.validate_goal_id(
+        time.strftime("g-%Y%m%d-%H%M%S") if gid is None else gid)
+    accept = contractmod.validate_acceptance(accept)
+    max_usd = contractmod.validate_budget_limit(max_usd, "max_usd")
+    max_minutes = contractmod.validate_budget_limit(
+        max_minutes, "max_minutes", whole=True)
+    cycles = contractmod.validate_budget_limit(
+        cycles, "cycles", whole=True, positive=True)
+    criteria = str(criteria or "").strip() or (
+                                    "The goal is achieved when a competent "
                                     "reviewer, seeing only the artifacts on "
                                     "disk, would agree it is done.")
+    d = _goal_dir(root, gid)
+    rel_dir = f"goals/{gid}"
     with open(os.path.join(d, "goal.md"), "w", encoding="utf-8") as f:
         f.write(f"# GOAL\n{goal}\n\n# SUCCESS CRITERIA\n{criteria}\n")
     with open(os.path.join(d, "toolbox.md"), "w", encoding="utf-8") as f:
@@ -212,7 +229,7 @@ def pursue(home, expert, goal, criteria="", cycles=4, drive=False,
         contractmod.event(root, gid, "resumed", expert=expert)
     except (OSError, ValueError):
         contractmod.create(root, gid, goal, criteria=criteria,
-                           accept=accept or [], max_usd=max_usd,
+                           accept=accept, max_usd=max_usd,
                            max_minutes=max_minutes, max_cycles=cycles)
         contractmod.freeze(root, gid)
     rec = {"id": gid, "goal": goal, "criteria": criteria, "expert": expert,

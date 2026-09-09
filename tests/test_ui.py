@@ -62,6 +62,21 @@ def main():
         assert len(experts) == 1 and experts[0]["identity"] == "neural nets"
         print("[create] one click -> expert with its own identity and memory")
 
+        # Learner creation includes a goal launch. Invalid cycles must fail
+        # before either half writes state; false/zero used to become six.
+        try:
+            api("POST", "/api/learner", {
+                "name": "Invalid Learner", "topic": "nothing",
+                "cycles": False})
+            raise AssertionError("invalid learner cycles must be refused")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+        assert not os.path.exists(os.path.join(
+            home, "experts", "invalid-learner")), (
+            "invalid learner launch created an expert before refusing")
+        print("[learner-input] invalid cycles refuse before expert or goal "
+              "state is created")
+
         # teach it a link, over the real scheme ingestion accepts
         page = os.path.join(home, "p.html")
         with open(page, "w", encoding="utf-8") as f:
@@ -116,6 +131,25 @@ def main():
         assert tasks and all(k in tasks[0] for k in
                              ("id", "role", "status", "goal", "steps", "created"))
         print("[board] full task list served with ids, steps, ages")
+
+        # Saving a mission contract and starting criterion-bound work are two
+        # distinct operations. The second carries its reason and gate into
+        # both the task queue and the durable mission action ledger.
+        mr = api("POST", "/api/missions", {
+            "expert": "deep-learner", "objective": "publish a checked report",
+            "criteria": ["the report exists"]})
+        assert mr.get("mission") and mr.get("criteria") == 1, mr
+        mw = api("POST", "/api/experts/deep-learner/mission_task", {
+            "mission": mr["mission"], "criterion": "C1",
+            "role": "practitioner", "goal": "write out/report.md",
+            "expected_evidence": "out/report.md exists",
+            "done_check": {"gate": "exists", "path": "out/report.md"}})
+        assert mw.get("queued") and mw.get("running") is True, mw
+        mv = api("GET", "/api/experts/deep-learner/missions/" + mr["mission"])
+        assert mv["actions"] == 1 and mv["current_action"]["task"] == mw["queued"], mv
+        api("POST", "/api/experts/deep-learner/stop", {})
+        print("[mission-work] saving defined the contract; a separate checked "
+              "action bound C1, queued its task and started the agent")
 
         # --- mission control: memory browser
         tree = api("GET", "/api/experts/deep-learner/tree")

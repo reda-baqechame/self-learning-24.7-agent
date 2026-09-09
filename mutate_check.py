@@ -21,6 +21,80 @@ PY = sys.executable
 
 # (label, file, find, replace, test, what the test must notice)
 MUTATIONS = [
+    ("panel goal: raw grader field restored", "ui.html",
+     'class="field gGate" aria-label="acceptance gate"',
+     'class="field" id="gAccept" aria-label="acceptance gate"',
+     "test_ledger_defects.py", "goal form must expose named gates only"),
+
+    ("mission work: acceptance gate made optional", "ui.py",
+     '''    if not d.get("done_check"):
+        raise ValueError("mission work needs a named acceptance gate")
+    done_check = _net_gate(d["done_check"])''',
+     '''    done_check = _net_gate(d.get("done_check"))''',
+     "test_ledger_defects.py", "ungated mission work was queued"),
+
+    ("panel routes: browser history overwritten", "ui.html",
+     'if(S.routeReady) history.pushState(null, "", h);',
+     'if(S.routeReady) history.replaceState(null, "", h);',
+     "test_ledger_defects.py", "Back/Forward route history must be retained"),
+
+    ("panel goal: raw network grader accepted", "ui.py",
+     '''        if not isinstance(spec, dict):
+            raise ValueError("goal acceptance over the network must name a gate")''',
+     '''        if not isinstance(spec, dict):
+            spec = {"gate": "exists", "path": "out/x"}''',
+     "test_ledger_defects.py", "network acceptance accepted"),
+
+    ("goal budget: nonfinite limit accepted", "contract.py",
+     '    if not math.isfinite(number):',
+     '    if False:',
+     "test_ledger_defects.py", "invalid goal limit was accepted"),
+
+    ("goal contract: non-string grader accepted", "contract.py",
+     '        if not isinstance(check, str) or not check.strip():',
+     '        if False:',
+     "test_ledger_defects.py", "malformed contract acceptance was accepted"),
+
+    ("goal contract: traversal id accepted", "contract.py",
+     '''    if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", value):''',
+     '''    if False:''',
+     "test_ledger_defects.py", "malformed goal identity was accepted"),
+
+    ("goal contract: unsafe swarm group accepted", "contract.py",
+     '''            if not isinstance(group, str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", group):''',
+     '''            if False:''',
+     "test_ledger_defects.py", "malformed contract acceptance was accepted"),
+
+    ("goal contract: empty objective accepted", "contract.py",
+     '    goal = validate_goal_text(goal)',
+     '    goal = str(goal)',
+     "test_ledger_defects.py", "malformed goal identity was accepted"),
+
+    ("goal pursuit: artifacts precede validation", "goal.py",
+     '    goal = contractmod.validate_goal_text(goal)',
+     '    goal = str(goal)',
+     "test_ledger_defects.py", "invalid pursuit reached artifact creation"),
+
+    ("goal pursuit: empty explicit id becomes default", "goal.py",
+     '''        time.strftime("g-%Y%m%d-%H%M%S") if gid is None else gid)''',
+     '''        gid or time.strftime("g-%Y%m%d-%H%M%S"))''',
+     "test_ledger_defects.py", "invalid pursuit reached artifact creation"),
+
+    ("goal pursuit: expert path escapes the fleet", "goal.py",
+     '''    if not isinstance(expert, str) or not re.fullmatch(
+            r"[a-z0-9-]{1,64}", expert):''',
+     '''    if False:''',
+     "test_ledger_defects.py", "invalid pursuit reached artifact creation"),
+
+    ("learner: invalid cycles silently default", "ui.py",
+     '''                learner_cycles = _goal_request({
+                    "cycles": d["cycles"] if "cycles" in d else 6
+                })["cycles"]''',
+     '''                learner_cycles = d.get("cycles") or 6''',
+     "test_ui.py", "invalid learner launch created an expert before refusing"),
+
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',
@@ -193,11 +267,8 @@ MUTATIONS = [
      "an unauthenticated upload attempt instead of a refusal"),
 
     ("acquire: install becomes bookkeeping again", "acquire.py",
-     '''    rc, out, err = execution.run("converter", argv, root, timeout=600,
-                                 reason=f"acquire {spec}")
-    ok = (rc == 0)''',
-     '''    rc, out, err = 0, "(install %s)" % spec, ""
-    ok = True''',
+     '''        rc, out, err = sandbox.run(shlex.join(argv), arena, {}, 900, install_cfg)''',
+     '''        rc, out, err = 0, "(install recorded without execution)", ""''',
      "test_acquire.py",
      "an acquisition reaching 'trusted' with nothing installed"),
 
