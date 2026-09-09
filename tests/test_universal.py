@@ -723,6 +723,17 @@ def check_the_unified_entry_point_is_reachable():
                        {"expert": "nosuchexpert", "goal": "do a thing"})
         assert code == 404, (code, r)
 
+        # Launch constraints are parsed before resolve(apply=...). A raw
+        # grader plus malformed budget must be answered as the grader error;
+        # the resolver and goal engine have not been entered yet.
+        code, r = call("POST", "/api/achieve", {
+            "expert": "probe", "goal": "write a report", "learn": False,
+            "accept": ["report exists::python -c 'print(1)'"],
+            "max_usd": "5oops"})
+        assert code == 400 and "name a gate" in json.dumps(r), (code, r)
+        assert not os.path.exists(os.path.join(
+            home, "experts", "probe", "goals")), r
+
         # a goal whose gap routes to the OWNER must not start work
         code, r = call("POST", "/api/achieve", {
             "expert": "probe",

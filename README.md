@@ -90,7 +90,7 @@ continuously, prove what they did, and remember what they learned.**
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
 ![tests](https://img.shields.io/badge/tests-159%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-180%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-193%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
 123 Python modules · 159 registered acceptance tests · one HTML control panel · no
@@ -304,8 +304,8 @@ control defends the path its author was thinking about, and does not know
 about the other paths.* Six places executed shell; one was tested. The answer
 is one mandatory gateway per kind of power — Execution, File, Credential,
 Model Gateway, Effect, Control Plane — and `python execution.py --audit`
-fails the build if any module bypasses one. Today: **0 violations across 87
-modules**, 16 declared platform-internal.
+fails the build if any module bypasses one. Today: **0 violations across 123
+modules**, 19 declared platform-internal.
 
 The sixth arrived the same way the pattern predicts. A later audit asked what
 the first five answered *between* them, and found nothing there: the File
@@ -537,7 +537,7 @@ was wrong.
 
 **The tests enumerate rather than exemplify.** `tests/test_invariants.py`
 does not test through an example — it walks the tree: every subprocess call
-site in 77 modules, every declared control file, 12 traversal spellings, all
+site in 123 modules, every declared control file, 12 traversal spellings, all
 4 credential sources against every subsystem that must exclude them, all 9
 provider-call purposes, all 9 roles, every module that mints an expert, every
 reader of the exam file, the sandbox names across all test files, all
@@ -547,7 +547,9 @@ silent staleness bugs were found at once rather than one at a time.
 
 **Mutation testing — 0 missed.** A passing test proves nothing unless it
 would fail with the feature removed. `mutate_check.py` breaks each
-load-bearing behaviour and requires its test to fail:
+load-bearing behaviour and requires its test to fail. Representative rows
+and the historical local receipt at merged workflow commit `d629955` are
+shown here; they are not the current integrated-tree total:
 
 ```
 CAUGHT  docker: egress allowed by default
@@ -566,13 +568,13 @@ CAUGHT  loop: a running task is stolen from a live sibling
 SKIP    credentials: a secret written under the umask
 SKIP    docker: the container runs as root in the mount
 
-15 mutations: 12 caught, 0 missed, 3 skipped     [on Windows]
+65 mutations: 62 caught, 0 missed, 3 skipped     [Windows, local run]
 ```
 
-**A `SKIP` here is a refusal to score, and each states its own reason.** Two
-are POSIX-only because file modes are not the mechanism on Windows. The
-third — `every host variable forwarded into the container` — is POSIX-only
-for a completely different reason, and it is the one worth reading:
+**A `SKIP` here is a refusal to score, and each states its own reason.** All
+three are POSIX-only on this Windows host. Two exercise file ownership and
+mode behavior that Windows implements through ACLs. The third — `every host
+variable forwarded into the container` — is skipped for a different reason:
 forwarding a Windows `PATH` into a Linux container means `sh` cannot be
 found, so the container never boots and no assertion is ever reached. A
 CAUGHT there would be counting a crash, not a test noticing anything.
@@ -585,21 +587,17 @@ and only one was being checked: whether the test failed, and whether it
 failed **for the reason claimed**. A shared skip reason was the same mistake
 one level up, so each row now carries its own.
 
-Three scores, because where a mutation ran changes what it means:
+Mutation results are host-specific. The last workflow-only receipt before the
+computer-use union was:
 
 | Where | Result |
 |---|---|
-| Windows | 15 mutations: **12 caught, 0 missed**, 3 refused (POSIX-only) |
-| Linux container, no docker daemon | **11 caught, 0 missed**, 4 refused (the docker rows skip themselves rather than pass) |
-| CI on ubuntu, with a daemon | **15 caught, 0 missed, 0 skipped** — nothing is refused there, because nothing needs to be |
+| Windows at `d629955` | 65 mutations: **62 caught, 0 missed**, 3 refused (POSIX-only) |
 
-That last row is the one that counts, and it is the only one no machine here
-could produce: the docker mutations need a real daemon, and a container
-without one refuses to score rather than passing. Splitting that hair is the
-point — "15 caught on Linux" was written into this paragraph *before* any
-runner had said so, and had to be taken back out. It is exactly the reflex
-[U21](GAPS_RISKS_AND_UNFINISHED.md) is about, and writing the entry does not
-make you immune to it.
+Linux and CI must publish their own totals; this historical result does not claim
+those environments. Splitting that hair is the point — an earlier Linux
+total was written here before a runner had said so and had to be taken back
+out. That is exactly the reflex [U21](GAPS_RISKS_AND_UNFINISHED.md) records.
 
 **The paths that touch something real.** Docker containers actually start —
 isolation is proven by the container answering under its own hostname and a

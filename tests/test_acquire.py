@@ -464,6 +464,32 @@ def check_staging_never_control(sb):
           "into capabilities/ — the read-only control mounts stay absolute")
 
 
+def check_docker_free_proof_boundaries(sb):
+    """Pin proof boundaries that do not require a real installation."""
+    assert not acquire._matches({"thing"}, "everything available"), (
+        "capability matching fell back to substrings")
+
+    rec = acquire.request(sb, "phantom-probe", "pypi",
+                          "prove a phantom capability", version="1.0.0")
+    rows = acquire.load(sb)
+    for row in rows:
+        if row["id"] == rec["id"]:
+            row["stage"] = "installed"
+            row["install_path"] = ""
+            row["arena_path"] = ""
+    acquire._save(sb, rows)
+    try:
+        acquire.capability_test(sb, rec["id"])
+        raise AssertionError(
+            "the mandatory probe accepted a supplied/default verdict with "
+            "no installed arena")
+    except acquire.Refused as e:
+        assert "nothing is installed" in str(e), str(e)
+    print("[docker-free-proof] capability discovery matches whole words and "
+          "the mandatory test refuses a verdict when no validated install "
+          "arena exists")
+
+
 def main():
     sb = make_sandbox("acquire", providers={"m": {"script": "s.json"}},
                       roles={"practitioner": "m"},
@@ -496,6 +522,7 @@ def main():
     # Docker-free, so it runs everywhere: the container's write target must
     # never be a control path, and promotion into capabilities/ is the host's.
     check_staging_never_control(sb)
+    check_docker_free_proof_boundaries(sb)
 
     # A real install therefore needs a real sandbox. Where one exists, the
     # ladder is walked for real; where it does not, that part SKIPS OUT LOUD

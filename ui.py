@@ -605,7 +605,8 @@ POST_PERMISSION = {
 }
 # per-expert actions: POST /api/experts/<slug>/<action>
 ACTION_PERMISSION = {
-    "task": "run", "goal": "run", "consult": "run", "answer": "run",
+    "task": "run", "mission_task": "run", "goal": "run",
+    "consult": "run", "answer": "run",
     "start": "run", "stop": "run", "launch": "run", "wake": "run",
     "scan": "run", "url": "run", "verify": "run", "memcheck": "run",
     "probe": "run", "workflow": "run", "intention": "run",
@@ -784,16 +785,31 @@ def start_goal(home, slug, root, goal_text, gid=None, cycles=4, criteria=None,
     `accept` is the list of frozen acceptance tests ('what::command' each) —
     the graders the worker cannot write. Passing them here is how a goal
     started from the panel can end VERIFIED rather than merely achieved."""
-    gid = gid or time.strftime("g-%Y%m%d-%H%M%S")
-    if not re.fullmatch(r"[\w.-]{1,64}", gid):
-        raise ValueError("invalid goal id")
+    import contract as contractmod
+    try:
+        accept = contractmod.validate_acceptance(accept)
+        max_usd = contractmod.validate_budget_limit(max_usd, "max_usd")
+        max_minutes = contractmod.validate_budget_limit(
+            max_minutes, "max_minutes", whole=True)
+        cycles = contractmod.validate_budget_limit(
+            cycles, "cycles", whole=True, positive=True)
+    except contractmod.ContractError as e:
+        raise ValueError(str(e)) from None
+    gid = time.strftime("g-%Y%m%d-%H%M%S") if gid is None else gid
+    try:
+        goal_text = contractmod.validate_goal_text(goal_text)
+        gid = contractmod.validate_goal_id(gid)
+    except contractmod.ContractError as e:
+        raise ValueError(str(e)) from None
     cmd = [sys.executable, os.path.join(HOME, "goal.py"), "pursue",
            goal_text, "--expert", slug, "--home", home,
-           "--id", gid, "--drive", "--cycles", str(int(cycles or 4))]
+           "--id", gid, "--drive", "--cycles", str(cycles)]
     if criteria:
         cmd += ["--criteria", criteria]
-    for a in (accept or []):
-        cmd += ["--accept", str(a)]
+    for a in accept:
+        # goal.py's terminal grammar remains what::command. These values are
+        # already catalogue-built and carry no caller-authored command text.
+        cmd += ["--accept", f"{a['what']}::{a['check']}"]
     if max_usd:
         cmd += ["--max-usd", str(float(max_usd))]
     if max_minutes:
@@ -827,6 +843,92 @@ def _net_gate(spec):
             "gate instead, e.g. {\"gate\": \"exists\", \"path\": \"out/x.html\"}. "
             "The catalogue is at GET /api/gates.")
     return gates.build(spec)
+
+
+def _net_acceptance(specs):
+    """Build frozen goal graders from the same closed network catalogue.
+
+    The CLI deliberately accepts shell checks from a terminal operator. HTTP
+    callers name a gate; no field from the request becomes executable text.
+    """
+    import contract as contractmod
+    import gates
+    if specs is None:
+        return []
+    if not isinstance(specs, list):
+        raise ValueError("acceptance must be a list of named gate objects")
+    if len(specs) > contractmod.MAX_ACCEPT:
+        raise ValueError(f"at most {contractmod.MAX_ACCEPT} acceptance gates")
+    out = []
+    for i, spec in enumerate(specs, 1):
+        if not isinstance(spec, dict):
+            raise ValueError("goal acceptance over the network must name a gate")
+        check = _net_gate(spec)
+        if not check:
+            raise ValueError("an acceptance gate cannot be empty")
+        name = str(spec.get("gate") or "").strip().lower()
+        what = str(spec.get("what") or gates.CATALOGUE[name]["what"]).strip()
+        if not what:
+            raise ValueError("state what the acceptance gate proves")
+        out.append({"id": f"A{i}", "what": what[:300], "check": check})
+    return out
+
+
+def _goal_request(data):
+    """Validate every launch input before a resolver, write or process runs."""
+    import contract as contractmod
+    d = data if isinstance(data, dict) else {}
+    try:
+        return {
+            "accept": _net_acceptance(d.get("accept")),
+            "max_usd": contractmod.validate_budget_limit(
+                d["max_usd"] if "max_usd" in d else 0.0, "max_usd"),
+            "max_minutes": contractmod.validate_budget_limit(
+                d["max_minutes"] if "max_minutes" in d else 0,
+                "max_minutes", whole=True),
+            "cycles": contractmod.validate_budget_limit(
+                d["cycles"] if "cycles" in d else 4, "cycles",
+                whole=True, positive=True),
+        }
+    except contractmod.ContractError as e:
+        raise ValueError(str(e)) from None
+
+
+def queue_mission_task(home, slug, root, data, launch=True):
+    """Bind one checked task to one open mission criterion, then queue it."""
+    import mission
+    d = data if isinstance(data, dict) else {}
+    mid = str(d.get("mission") or "").strip()
+    criterion = str(d.get("criterion") or "").strip()
+    role = str(d.get("role") or "practitioner").strip()
+    task_goal = str(d.get("goal") or "").strip()
+    expected = str(d.get("expected_evidence") or "").strip()
+    if not re.fullmatch(r"m-[A-Za-z0-9-]{1,80}", mid):
+        raise ValueError("mission must be a valid mission id")
+    if not re.fullmatch(r"C[1-9][0-9]*", criterion):
+        raise ValueError("criterion must name one mission criterion, such as C1")
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", role):
+        raise ValueError("role must be a simple role name")
+    if not task_goal:
+        raise ValueError("mission work needs a task goal")
+    if not expected:
+        raise ValueError("mission work needs expected evidence")
+    if not d.get("done_check"):
+        raise ValueError("mission work needs a named acceptance gate")
+    done_check = _net_gate(d["done_check"])
+    chain = mission.justify(root, mid, criterion,
+                            milestone=d.get("milestone") or None,
+                            task_goal=task_goal,
+                            expected_evidence=expected)
+    tid = loop.Agent(root).add_task(
+        role, task_goal, [f for f in d.get("memory_files", []) if f],
+        d.get("course") or None, done_check=done_check,
+        stop=d.get("stop") or None, mission=mid, criterion=criterion)
+    mission.record_action(root, mid, chain, task_id=tid, status="queued")
+    if launch and not is_running(slug):
+        start_expert(home, slug)
+    return {"queued": tid, "mission": mid, "criterion": criterion,
+            "running": bool(launch)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1158,16 +1260,16 @@ class Handler(BaseHTTPRequestHandler):
             return {"role": d["role"], "config": r}
         if action == "goal":
             try:
+                request = _goal_request(self._data)
                 gid = start_goal(self.home, slug, root, self._data["goal"],
                                  self._data.get("id"),
-                                 self._data.get("cycles") or 4,
+                                 request["cycles"],
                                  self._data.get("criteria"),
-                                 accept=[str(a) for a in
-                                         (self._data.get("accept") or [])][:12],
-                                 max_usd=float(self._data.get("max_usd")
-                                               or 0.0))
+                                 accept=request["accept"],
+                                 max_usd=request["max_usd"],
+                                 max_minutes=request["max_minutes"])
             except ValueError as e:
-                return {"error": str(e)}
+                return {"error": str(e), "_status": 400}
             return {"pursuing": gid}
         if action == "template":
             return apply_template(root, slug, self._data["template"])
@@ -1365,6 +1467,8 @@ class Handler(BaseHTTPRequestHandler):
                 done_check=_net_gate(data.get("done_check")),
                 stop=data.get("stop") or None)
             return {"queued": tid}
+        if action == "mission_task":
+            return queue_mission_task(self.home, slug, root, self._data)
         if action == "wake":
             # wake-on-event: an external system (webhook, cron, another
             # agent) delivers an event; armed `event` intentions fire at
@@ -2265,6 +2369,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._fail({"error": f"no expert '{slug}'"}, 404)
                     return
                 criteria = (d.get("criteria") or "").strip()
+                # Parse every launch constraint before universal.resolve:
+                # apply=True may persist acquisitions, so an invalid budget
+                # or grader must stop before the resolver changes anything.
+                request = _goal_request(d)
                 plan = universal.resolve(self.home, slug, want, criteria,
                                          apply=bool(d.get("learn", True)))
                 if plan.get("needs_owner"):
@@ -2280,20 +2388,19 @@ class Handler(BaseHTTPRequestHandler):
                                      "authority is the one gap a machine must "
                                      "not resolve for itself."})
                     return
-                accept = [str(a) for a in (d.get("accept") or [])][:12]
                 gid = start_goal(self.home, slug, root, want,
-                                 cycles=d.get("cycles") or 4,
+                                 cycles=request["cycles"],
                                  criteria=criteria or None,
-                                 accept=accept,
-                                 max_usd=float(d.get("max_usd") or 0.0),
-                                 max_minutes=int(d.get("max_minutes") or 0))
+                                 accept=request["accept"],
+                                 max_usd=request["max_usd"],
+                                 max_minutes=request["max_minutes"])
                 self._json({"started": True, "goal_id": gid,
                             "verdict": plan.get("verdict"),
                             "actions": plan.get("actions") or [],
-                            "acceptance": len(accept),
+                            "acceptance": len(request["accept"]),
                             "message": f"resolved what could be resolved, "
                                        f"then started {gid}"
-                                       + ("" if accept else
+                                       + ("" if request["accept"] else
                                           " — no acceptance tests were "
                                           "given, so the outcome can be "
                                           "achieved but never VERIFIED")})
@@ -2305,6 +2412,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not topic:
                     self._fail({"error": "a learner needs a topic"}, 400)
                     return
+                # A learner is an expert plus a goal pursuit. Validate its
+                # launch ceiling before fleet.create writes the expert.
+                learner_cycles = _goal_request({
+                    "cycles": d["cycles"] if "cycles" in d else 6
+                })["cycles"]
                 dest = fleet.create(self.home, d["name"],
                                     d.get("identity") or f"learning {topic} to mastery")
                 slug = os.path.basename(dest)
@@ -2318,7 +2430,7 @@ class Handler(BaseHTTPRequestHandler):
                     goal_text += " Sources to ingest first: " + ", ".join(
                         d["sources"])[:800]
                 gid = start_goal(self.home, slug, dest, goal_text,
-                                 cycles=d.get("cycles") or 6)
+                                 cycles=learner_cycles)
                 self._json({"created": slug, "pursuing": gid})
             elif path == "/api/missions":
                 # UI spec §6: a mission is created with its success criteria,
