@@ -731,12 +731,16 @@ def check_platform_specific_mutations_are_honest(_work):
     for label in (
             "fileauth: dot path borrows trusted prefix zone",
             "computer session: caller reclassifies physical alias spelling",
-            "computer session: artifact pre-open inode binding removed",
+            "computer session: POSIX artifact anchor follows raced leaf",
             "computer session: artifact post-read inode binding removed",
             "computerbench: missing external artifact escapes contract refusal"):
         entry = entries[label]
         assert len(entry) > 6 and entry[6], (
             label + " exercises a POSIX branch and must not be credited on Windows")
+    windows = entries[
+        "computer session: Windows artifact anchor allows delete sharing"]
+    assert len(windows) > 8 and windows[8][0] == "nt" and windows[8][1], (
+        "Windows delete-sharing mutation must be explicitly Windows-only")
     print("[mutation-platforms] Windows alias cleanup/8.3 spelling and POSIX "
           "directory-fd/path-open anchoring have distinct, explicit applicability")
 

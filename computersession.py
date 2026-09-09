@@ -24,6 +24,45 @@ TERMINAL = frozenset({'VERIFIED','REFUSED','FAILED_WITH_KNOWN_NO_EFFECT','UNKNOW
 def _digest(value):
     return hashlib.sha256(C._canonical(value)).hexdigest()
 
+def _artifact_anchor(path):
+    flags=os.O_RDONLY|getattr(os,'O_BINARY',0)|getattr(os,'O_CLOEXEC',0)
+    if os.name!='nt':
+        return os.open(path,flags|getattr(os,'O_NOFOLLOW',0))
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel32=ctypes.WinDLL('kernel32',use_last_error=True)
+    create=kernel32.CreateFileW
+    create.argtypes=(wintypes.LPCWSTR,wintypes.DWORD,wintypes.DWORD,
+                     wintypes.LPVOID,wintypes.DWORD,wintypes.DWORD,
+                     wintypes.HANDLE)
+    create.restype=wintypes.HANDLE
+    close=kernel32.CloseHandle
+    close.argtypes=(wintypes.HANDLE,)
+    close.restype=wintypes.BOOL
+    full=os.path.abspath(path)
+    if not full.startswith('\\\\?\\'):
+        full='\\\\?\\UNC\\'+full[2:] if full.startswith('\\\\') else '\\\\?\\'+full
+    handle=create(full,0x80000000,0x00000001,None,3,0x00200000,None)
+    if handle==wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(
+            handle,flags|getattr(os,'O_NOINHERIT',0))
+    except BaseException:
+        close(handle)
+        raise
+
+def _read_bounded(fd,limit):
+    chunks=[]
+    while limit:
+        chunk=os.read(fd,limit)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        limit-=len(chunk)
+    return b''.join(chunks)
+
 class ComputerSession:
     def __init__(self, root, task, server_name, policy_revision):
         self.root = os.path.abspath(root)
@@ -302,20 +341,18 @@ class ComputerSession:
     def _artifact_checked(self,meta,allow_zones=None):
         path=fileauth.resolve(self.root,meta['path'],'read','harness',
                               allow_zones=allow_zones)
-        anchor_fd=os.open(path,os.O_RDONLY|getattr(os,'O_BINARY',0))
+        anchor_fd=_artifact_anchor(path)
         try:
             anchor=os.fstat(anchor_fd)
             before=C._no_links(path)
             if ((before.st_dev,before.st_ino)!=(anchor.st_dev,anchor.st_ino)
-                    or not stat.S_ISREG(anchor.st_mode) or anchor.st_nlink!=1):
+                    or not stat.S_ISREG(anchor.st_mode) or anchor.st_nlink!=1
+                    or getattr(anchor,'st_file_attributes',0)
+                       & getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0)):
                 raise C.Refused('artifact identity changed before read')
-            with open(path,'rb') as f:
-                info=os.fstat(f.fileno())
-                if ((info.st_dev,info.st_ino)!=(anchor.st_dev,anchor.st_ino)
-                        or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
-                        or info.st_size!=meta['bytes']):
-                    raise C.Refused('artifact identity or size changed')
-                raw=f.read(meta['bytes']+1)
+            if anchor.st_size!=meta['bytes']:
+                raise C.Refused('artifact size changed')
+            raw=_read_bounded(anchor_fd,meta['bytes']+1)
             if hashlib.sha256(raw).hexdigest()!=meta['sha256']:
                 raise C.Refused('artifact bytes changed')
             if fileauth.resolve(self.root,meta['path'],'read','harness',
@@ -324,6 +361,14 @@ class ComputerSession:
             after=C._no_links(path)
             if (after.st_dev,after.st_ino)!=(anchor.st_dev,anchor.st_ino):
                 raise C.Refused('artifact path changed')
+            anchor_after=os.fstat(anchor_fd)
+            if ((anchor_after.st_dev,anchor_after.st_ino)!=(anchor.st_dev,anchor.st_ino)
+                    or not stat.S_ISREG(anchor_after.st_mode)
+                    or anchor_after.st_nlink!=1
+                    or anchor_after.st_size!=meta['bytes']
+                    or getattr(anchor_after,'st_file_attributes',0)
+                       & getattr(stat,'FILE_ATTRIBUTE_REPARSE_POINT',0)):
+                raise C.Refused('artifact identity or size changed after read')
             return raw
         finally:
             os.close(anchor_fd)

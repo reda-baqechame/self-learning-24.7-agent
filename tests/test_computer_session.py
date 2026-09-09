@@ -313,7 +313,7 @@ class Sessions(unittest.TestCase):
         self.assertEqual(Path(created).read_text(),'ordinary')
         print('[path-identity] actual platform alias, typed zones, ambiguous spellings, cross-zone/outside links, secret hardlink and ordinary writes follow one authority contract')
 
-    def test_artifact_inode_replacement_before_and_after_open_refuses(self):
+    def test_artifact_path_replacement_after_read_refuses(self):
         F=self.CS.fileauth
         (self.root/'effects').mkdir(exist_ok=True)
         target=self.root/'effects'/'stable.txt'; raw=b'stable evidence'
@@ -333,29 +333,6 @@ class Sessions(unittest.TestCase):
                 os.close(fd)
             return old
 
-        real_open=open; swapped=[]; attempted=[]
-        def racing_open(path,*args,**kwargs):
-            if os.path.normcase(os.fspath(path))==os.path.normcase(str(target)) \
-                    and args and args[0]=='rb' and not swapped:
-                attempted.append(True)
-                swapped.append(replace_inode('.before'))
-            return real_open(path,*args,**kwargs)
-        # Credential classification has its own alias/hard-link coverage above.
-        # Isolate it here so the first binary open after `_no_links` is the
-        # artifact descriptor whose pre-open identity binding we are testing.
-        with patch('credentials.is_secret',return_value=False), \
-                patch('builtins.open',side_effect=racing_open):
-            with self.assertRaises(C.Refused):
-                s._artifact(meta,allow_zones=allowed)
-        self.assertTrue(attempted)
-        if swapped:
-            target.unlink(); os.replace(swapped[0],target)
-        else:
-            # Windows may deny renaming an object while the anchor descriptor
-            # is open.  That is a safe refusal at the same boundary; POSIX
-            # must complete the swap so the identity comparison is exercised.
-            self.assertEqual(os.name,'nt')
-
         real_resolve=F.resolve; calls=0; replaced=[]
         def racing_resolve(root,rel,*args,**kwargs):
             nonlocal calls
@@ -368,7 +345,65 @@ class Sessions(unittest.TestCase):
         with patch.object(F,'resolve',side_effect=racing_resolve):
             with self.assertRaises(C.Refused):
                 s._artifact(meta,allow_zones=allowed)
-        print('[artifact-race] an open identity anchor blocks or detects same-bytes replacement before read; post-read replacement also refuses before reconciliation state can change')
+        print('[artifact-race] the single read anchor and final pathname binding refuse same-bytes replacement before reconciliation state can change')
+
+    @unittest.skipUnless(os.name=='nt','Windows delete-sharing contract')
+    def test_windows_artifact_anchor_denies_delete_sharing(self):
+        F=self.CS.fileauth
+        (self.root/'effects').mkdir(exist_ok=True)
+        target=self.root/'effects'/'stable.txt'; raw=b'stable evidence'
+        target.write_bytes(raw)
+        meta={'path':'effects/stable.txt',
+              'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}
+        attempted=[]; swapped=[]; real_read=self.CS.os.read
+        def racing_read(fd,size):
+            attempted.append(True)
+            old=target.with_suffix('.old')
+            os.replace(target,old)
+            swapped.append(old)
+            target.write_bytes(raw)
+            result=real_read(fd,size)
+            target.unlink(); os.replace(old,target); swapped.clear()
+            return result
+        with patch.object(self.CS.os,'read',side_effect=racing_read):
+            with self.assertRaises(C.Refused):
+                self.session()._artifact(meta,allow_zones={F.ZONE_CONTROL,F.ZONE_RUNTIME})
+        self.assertTrue(attempted)
+        self.assertEqual(swapped,[])
+
+    @unittest.skipIf(os.name=='nt','POSIX O_NOFOLLOW contract')
+    def test_posix_artifact_anchor_never_follows_raced_leaf(self):
+        F=self.CS.fileauth
+        (self.root/'effects').mkdir(exist_ok=True)
+        target=self.root/'effects'/'stable.txt'; raw=b'stable evidence'
+        target.write_bytes(raw)
+        old=target.with_suffix('.old')
+        external=self.root/'external.txt'
+        external.write_bytes(raw)
+        meta={'path':'effects/stable.txt',
+              'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}
+        attempted=[]; real_open=self.CS.os.open
+        def racing_open(path,flags,*args,**kwargs):
+            if os.path.normcase(os.fspath(path))==os.path.normcase(str(target)):
+                attempted.append(True)
+                os.replace(target,old)
+                os.symlink(external,target)
+                fd=real_open(path,flags,*args,**kwargs)
+                target.unlink()
+                os.link(external,target)
+                external.unlink()
+                return fd
+            return real_open(path,flags,*args,**kwargs)
+        try:
+            with patch.object(self.CS.os,'open',side_effect=racing_open):
+                with self.assertRaises(C.Refused):
+                    self.session()._artifact(
+                        meta,allow_zones={F.ZONE_CONTROL,F.ZONE_RUNTIME})
+            self.assertTrue(attempted)
+        finally:
+            if target.exists() or target.is_symlink(): target.unlink()
+            if external.exists(): external.unlink()
+            if old.exists(): os.replace(old,target)
 
     def test_persistent_lease_health_never_recommends_deletion(self):
         import harness, locks
