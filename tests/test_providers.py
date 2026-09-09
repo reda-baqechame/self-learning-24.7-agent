@@ -16,11 +16,16 @@ Run from the agent/ directory:  python tests/test_providers.py
 """
 
 import json
+import copy
 import os
+import subprocess
 import sys
 import threading
+import time
 import tomllib
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import patch
 
 from common import free_port, AGENT_DIR, make_sandbox
 
@@ -28,6 +33,7 @@ sys.path.insert(0, AGENT_DIR)
 import loop
 import providers as P
 import toolbox
+import locks
 
 PORT = free_port()
 CATALOG = {"data": [
@@ -52,12 +58,268 @@ class Cat(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+_PROVIDER_PROCESS = '''
+import os, sys
+import providers as P
+import locks
+root, mode = sys.argv[1:]
+if mode in ("hold", "hold-dead"):
+    original = P.save
+    def paused_save(root, cfg):
+        with open(os.path.join(root, "provider-holder.ready"), "w") as f:
+            f.write("holding")
+        sys.stdin.readline()
+        return original(root, cfg)
+    P.save = paused_save
+    name = "held-provider" if mode == "hold" else "killed-provider"
+    P.add(root, name, base_url="https://held.example/v1")
+else:
+    old_holding = locks.holding
+    def bounded_old(path, timeout=20, stale=60):
+        return old_holding(path, timeout=0.2, stale=stale)
+    locks.holding = bounded_old
+    if hasattr(locks, "advisory_holding"):
+        os_holding = locks.advisory_holding
+        def bounded_os(path, timeout=20):
+            return os_holding(path, timeout=0.2)
+        locks.advisory_holding = bounded_os
+    try:
+        P.set_role(root, mode, "m", "process-model")
+    except TimeoutError:
+        print("BLOCKED")
+    else:
+        print("COMMITTED")
+'''
+
+
+def provider_process(sb, mode):
+    return subprocess.Popen([sys.executable, "-c", _PROVIDER_PROCESS, sb, mode],
+                            cwd=AGENT_DIR, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def paused_provider(sb, mode="hold"):
+    ready = os.path.join(sb, "provider-holder.ready")
+    if os.path.exists(ready):
+        os.remove(ready)
+    child = provider_process(sb, mode)
+    deadline = time.monotonic() + 5
+    while not os.path.exists(ready) and child.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not os.path.exists(ready):
+        child.kill()
+        out, err = child.communicate(timeout=5)
+        raise AssertionError(f"provider did not reach its paused save: {out} {err}")
+    return child
+
+
+def process_updates(sb):
+    """An aged live holder keeps exclusion; process death releases it immediately."""
+    before = P.load(sb)
+    holder = paused_provider(sb)
+    try:
+        lock_path = os.path.join(sb, "settings.toml.update.lock")
+        lock_stat = os.stat(lock_path)
+        old = time.time() - 120
+        os.utime(lock_path, (old, old))
+        contender = provider_process(sb, "after-live")
+        out, err = contender.communicate(timeout=5)
+        assert contender.returncode == 0, err
+        assert out.strip() == "BLOCKED", "aged live provider owner was stolen"
+        assert P.load(sb) == before, "blocked contender changed settings"
+        out, err = holder.communicate("resume\n", timeout=5)
+        assert holder.returncode == 0, err
+        P.set_role(sb, "after-live", "m", "process-model")
+        after_stat = os.stat(lock_path)
+        assert (after_stat.st_ino, after_stat.st_size) == (lock_stat.st_ino, lock_stat.st_size), \
+            "provider locking replaced or grew its persistent lock file"
+        after = P.load(sb)
+        assert after["providers"].pop("held-provider") == {
+            "base_url": "https://held.example/v1", "api_key_env": "HELD-PROVIDER_API_KEY"}
+        assert after["roles"].pop("after-live") == {
+            "provider": "m", "model": "process-model"}
+        assert after == before, "resumed public updates lost original settings"
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+        holder.communicate(timeout=5)
+    print("[live-owner] old mtime cannot steal a paused provider transaction; resumed edits both survive")
+
+
+def dead_provider(sb):
+    """A dead process cannot hold the next provider transaction hostage."""
+    before = P.load(sb)
+    holder = paused_provider(sb, "hold-dead")
+    holder.kill()
+    holder.communicate(timeout=5)
+    assert P.load(sb) == before, "killed writer committed its paused save"
+    contender = provider_process(sb, "after-death")
+    out, err = contender.communicate(timeout=5)
+    assert contender.returncode == 0, err
+    assert out.strip() == "COMMITTED", "dead provider owner retained exclusion"
+    after = P.load(sb)
+    assert after["roles"].pop("after-death") == {"provider": "m", "model": "process-model"}
+    assert after == before, "dead-owner recovery changed unrelated settings"
+    print("[dead-owner] terminating a provider process releases exclusion without stale-time takeover")
+
+
+def concurrent_updates(sb):
+    """Removing the lock or reading before it loses a distinct public edit."""
+    before = P.load(sb)
+    first_saving = threading.Event()
+    second_boundary = threading.Event()
+    second_loaded = threading.Event()
+    second_done = threading.Event()
+    errors = []
+    real_load, real_save = P.load, P.save
+
+    def observed_load(root):
+        cfg = real_load(root)
+        if threading.current_thread().name == "role-writer":
+            second_loaded.set()
+            second_boundary.set()
+        return cfg
+
+    def observe_lock(real_holding):
+        @contextmanager
+        def observed_holding(*args, **kwargs):
+            if threading.current_thread().name == "role-writer":
+                second_boundary.set()
+            with real_holding(*args, **kwargs):
+                yield
+        return observed_holding
+
+    def delayed_save(root, cfg):
+        if threading.current_thread().name == "provider-writer":
+            first_saving.set()
+            assert second_boundary.wait(5), "second public update never started"
+            # An unlocked reader can finish first; a stale reader waiting on
+            # the lock must instead wait for this writer's commit.
+            if second_loaded.is_set():
+                second_done.wait(0.5)
+        return real_save(root, cfg)
+
+    def run(operation, done=None):
+        try:
+            operation()
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if done:
+                done.set()
+
+    first = threading.Thread(name="provider-writer", target=run, args=(
+        lambda: P.add(sb, "concurrent", base_url="https://concurrent.example/v1"),))
+    second = threading.Thread(name="role-writer", target=run, args=(
+        lambda: P.set_role(sb, "concurrent-role", "m", "concurrent-model"),
+        second_done))
+    with patch.object(P, "load", observed_load), \
+            patch.object(P, "save", delayed_save), \
+            patch.object(locks, "advisory_holding", observe_lock(locks.advisory_holding)), \
+            patch.object(locks, "holding", observe_lock(locks.holding)):
+        first.start()
+        assert first_saving.wait(5), "first public update never reached save"
+        second.start()
+        first.join(25)
+        second.join(25)
+        assert not first.is_alive() and not second.is_alive(), "writers hung"
+    assert not errors, f"public updates raised: {errors!r}"
+    after = P.load(sb)
+    assert after["providers"].get("concurrent") == {
+        "base_url": "https://concurrent.example/v1",
+        "api_key_env": "CONCURRENT_API_KEY"}, "independent provider update lost"
+    assert after["roles"].get("concurrent-role") == {
+        "provider": "m", "model": "concurrent-model"}, "independent role update lost"
+    del after["providers"]["concurrent"]
+    del after["roles"]["concurrent-role"]
+    assert after == before, "concurrent updates changed original nested settings"
+    print("[transaction] concurrent public add + set_role preserve both edits and all original settings")
+
+
+def interrupted_saves(sb):
+    """Shared temp names, missing fsync, or broad cleanup destroy isolation."""
+    path = os.path.join(sb, "settings.toml")
+    with open(path, "rb") as f:
+        original = f.read()
+    cfg = P.load(sb)
+    shared = path + ".tmp"
+    with open(shared, "wb") as f:
+        f.write(b"another writer owns this file")
+    rendezvous = threading.Barrier(2)
+    replaced, synced, failures = [], [], []
+    real_fsync = os.fsync
+
+    def tracked_fsync(fd):
+        real_fsync(fd)
+        stat = os.fstat(fd)
+        synced.append((stat.st_ino, stat.st_size))
+
+    def fail_replace(src, dst):
+        with open(src, "rb") as f:
+            parsed = tomllib.load(f)
+            stat = os.fstat(f.fileno())
+        replaced.append((src, dst, parsed, (stat.st_ino, stat.st_size)))
+        rendezvous.wait(5)
+        raise PermissionError("injected replacement failure")
+
+    def writer():
+        try:
+            P.save(sb, copy.deepcopy(cfg))
+        except BaseException as exc:
+            failures.append(exc)
+
+    with patch.object(os, "fsync", tracked_fsync), \
+            patch.object(os, "replace", fail_replace):
+        threads = [threading.Thread(target=writer) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        assert all(not thread.is_alive() for thread in threads), "save writers hung"
+    assert len(failures) == 2 and all(isinstance(e, PermissionError) for e in failures), failures
+    assert len(replaced) == 2 and len({row[0] for row in replaced}) == 2, \
+        "concurrent saves collided on a shared temporary file"
+    for src, dst, parsed, stamp in replaced:
+        assert os.path.dirname(src) == sb and dst == path, "temp must share destination directory"
+        assert parsed == cfg, "replacement saw incomplete settings"
+        assert stamp in synced, "temporary settings were not flushed and fsynced before replacement"
+        assert not os.path.exists(src), "failed writer leaked its own temporary file"
+    with open(path, "rb") as f:
+        assert f.read() == original, "failed replacement changed original bytes"
+    assert P.load(sb) == cfg, "original settings no longer parse losslessly"
+    with open(shared, "rb") as f:
+        assert f.read() == b"another writer owns this file", "writer touched another writer's temp"
+    os.remove(shared)
+    print("[interruption] concurrent failed replacements preserve original and foreign temp; unique temps fsynced and cleaned")
+
+
 def main():
     sb = make_sandbox("providers", providers={"m": {"script": "s.json"}},
                       roles={"tester": "m"}, scripts={"s.json": []},
                       extra=('max_task_usd = 1.5\n[agent.chain]\n'
                              'ripper = "watcher"'),
                       role_tools={"tester": ["write_file"]})
+
+    # Provider and role edits are narrow operations.  Unrelated root tables
+    # and arbitrarily deep settings must survive them as the same TOML data,
+    # rather than merely leaving behind syntax that tomllib can parse.
+    with open(os.path.join(sb, "settings.toml"), "a", encoding="utf-8") as f:
+        f.write('''
+[agent.http_endpoints.tickets]
+base = "https://api.example.test/v1"
+methods = ["GET", "POST"]
+[agent.memory_router.examiner]
+include = ["lesson", "failure"]
+[acquire]
+mode = "strict"
+[acquire.versions]
+policy = "v1"
+''')
+
+    concurrent_updates(sb)
+    interrupted_saves(sb)
+    process_updates(sb)
+    dead_provider(sb)
 
     # --- 1. adding providers, and a lossless settings round-trip
     before = P.load(sb)
@@ -77,6 +339,9 @@ def main():
     assert cfg["agent"]["chain"]["ripper"] == "watcher"
     assert cfg["roles"]["tester"]["tools"] == ["write_file"]
     assert cfg["providers"]["m"]["type"] == "mock"
+    assert cfg["agent"]["http_endpoints"] == before["agent"]["http_endpoints"]
+    assert cfg["agent"]["memory_router"] == before["agent"]["memory_router"]
+    assert cfg["acquire"] == before["acquire"]
     assert before["agent"]["poll_interval_seconds"] == \
         cfg["agent"]["poll_interval_seconds"]
     raw = open(os.path.join(sb, "settings.toml"), encoding="utf-8").read()

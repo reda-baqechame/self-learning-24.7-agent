@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C COMPUTERBENCH_VERIFIER_LAUNCHER=/opt/expert-fleet/computerbench-verifier/computerbench-verifier /usr/bin/python3 -I -S /opt/expert-fleet/computerbench-verifier/computerbench_verifier.py "$@"

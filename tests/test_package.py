@@ -23,6 +23,7 @@ Run from the agent/ directory:  python tests/test_package.py
 """
 
 import io
+import contextlib
 import json
 import os
 import re
@@ -30,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 import zipfile
 
 from common import AGENT_DIR
@@ -37,6 +39,7 @@ from common import AGENT_DIR
 sys.path.insert(0, AGENT_DIR)
 import credentials             # noqa: E402
 import evidence                # noqa: E402
+import run_all                 # noqa: E402
 
 PY = sys.executable
 # Assembled at runtime, never written as a literal. This file SHIPS in the
@@ -210,7 +213,8 @@ def check_it_is_actually_runnable(zpath, work):
     names = set(zipfile.ZipFile(zpath).namelist())
     flat = {os.path.basename(n) for n in names}
     for must in ("loop.py", "harness.py", "ui.py", "ui.html", "settings.toml",
-                 "fleet.py", "bootstrap.py", "run_all.py", "constitution.md"):
+                 "fleet.py", "bootstrap.py", "run_all.py", "constitution.md",
+                 "computerbench-verifier"):
         assert must in flat, f"the archive is missing {must}"
     n_mods = len([n for n in names if n.endswith(".py")
                   and "tests/" not in n.replace("\\", "/")])
@@ -302,9 +306,20 @@ def check_a_skip_is_not_a_failure(work):
 
     def run_text(lines):
         out = []
+        failed, skipped_rows = [], []
         for name, body in lines:
             out.append(f"=== {name} ===")
             out += body
+            skip = next((re.match(rf"^SKIP\s+{re.escape(name[:-3])}\b\s*:?\s*(.*)$", line)
+                         for line in body
+                         if re.match(rf"^SKIP\s+{re.escape(name[:-3])}\b", line)), None)
+            if skip:
+                skipped_rows.append((name, skip.group(1).strip()
+                                     or "no reason given"))
+            elif not any(re.match(r"^(PASS\s|OK$)", line) for line in body):
+                failed.append(name)
+        out.append(_runner_record([name for name, _body in lines],
+                                  failed, skipped_rows))
         return "\n".join(out)
 
     every = [(t, [f"[obs] {t} observed something", f"PASS {t[:-3]}"])
@@ -321,14 +336,15 @@ def check_a_skip_is_not_a_failure(work):
     skipped = [(t, ([f"[obs] {t} set up, then could not continue",
                      f"SKIP {t[:-3]}: {WHY}"] if t == victim else b))
                for t, b in every]
-    rep = evidence.build(run_text(skipped))
+    rep = evidence.build(run_text(skipped), _expected_tests=tests)
     assert rep["observations"] == sum(s["observations"] for s in rep["systems"]), \
         "headline counted observations omitted from the passing evidence ledger"
     # Docker's live test currently prints SKIP and then PASS. Skip wins in
     # either order, matching run_all's three-outcome accounting.
     for body in (["SKIP test_docker_live: unavailable", "PASS test_docker_live"],
                  ["PASS test_docker_live", "SKIP test_docker_live: unavailable"]):
-        parsed = evidence.parse(run_text([("test_docker_live.py", body)]))
+        parsed = evidence.parse(run_text([("test_docker_live.py", body)]),
+                                _expected_tests=["test_docker_live.py"])
         assert not parsed["test_docker_live.py"]["passed"], "SKIP became a pass"
         assert parsed["test_docker_live.py"]["skipped"] == "unavailable"
     sysrep = next(x for x in rep["systems"] if x["system"] == sysname)
@@ -344,7 +360,7 @@ def check_a_skip_is_not_a_failure(work):
     md = evidence.render(rep)
     private = evidence.build(run_text([(healthy, [
         "[obs] C:/Users/Example Person/AppData/Local/Temp/fixture/result.txt verified",
-        f"PASS {healthy[:-3]}"])]))
+        f"PASS {healthy[:-3]}"])]), _expected_tests=[healthy])
     public = evidence.render(private)
     assert "Example Person" not in public and "[user-home]/AppData" in public
     assert "redacted" in public and "fixture/result.txt verified" in public
@@ -361,7 +377,7 @@ def check_a_skip_is_not_a_failure(work):
     # --- but a REAL failure is still a failure ----------------------------
     broken = [(t, ([f"[obs] {t} started"] if t == victim else b))
               for t, b in every]
-    rep2 = evidence.build(run_text(broken))
+    rep2 = evidence.build(run_text(broken), _expected_tests=tests)
     sys2 = next(x for x in rep2["systems"] if x["system"] == sysname)
     assert sys2["verdict"] == "FAILING", (
         f"a test that neither passed nor skipped was not reported as failing "
@@ -371,7 +387,7 @@ def check_a_skip_is_not_a_failure(work):
 
     # --- a system where EVERYTHING skipped is UNPROVEN, not proven --------
     allskip = [(t, [f"SKIP {t[:-3]}: {WHY}"]) for t, _b in every]
-    rep3 = evidence.build(run_text(allskip))
+    rep3 = evidence.build(run_text(allskip), _expected_tests=tests)
     sys3 = next(x for x in rep3["systems"] if x["system"] == sysname)
     assert sys3["verdict"] == "UNPROVEN", (
         f"every test in the system declined to run and the verdict was "
@@ -421,9 +437,8 @@ def check_interleaved_logs_cannot_cry_wolf(_work):
             lines.append(f"PASS {victim[:-3]}")
         lines.append(f"[obs] {t} observed something")
         lines.append(f"PASS {t[:-3]}")
-    tail = (f"{len(tests)} executed: {len(tests)} passed, 0 skipped, "
-            f"0 failed")
-    rep = evidence.build("\n".join(lines + [tail]))
+    record = _runner_record(tests)
+    rep = evidence.build("\n".join(lines + [record]), _expected_tests=tests)
     sysrep = next(x for x in rep["systems"] if x["system"] == sysname)
     assert sysrep["verdict"] != "FAILING" and victim not in \
         sysrep["tests_failed"], (
@@ -436,15 +451,38 @@ def check_interleaved_logs_cannot_cry_wolf(_work):
     for t in tests:
         bad.append(f"=== {t} ===")
         bad.append(f"PASS {t[:-3]}")
-    bad.append(f"FAILED: {victim}")
-    bad.append(f"{len(tests)} executed: {len(tests) - 1} passed, 0 skipped, "
-               f"1 failed")
-    rep2 = evidence.build("\n".join(bad))
+    bad.append(_runner_record(tests, [victim]))
+    rep2 = evidence.build("\n".join(bad), _expected_tests=tests)
     sysrep2 = next(x for x in rep2["systems"] if x["system"] == sysname)
     assert victim in sysrep2["tests_failed"] or \
         sysrep2["verdict"] == "FAILING", (
         "a failure named by run_all's authoritative tail was laundered "
         "into a pass", sysrep2)
+
+    # A single FAILED line names the complete comma-separated set. The
+    # generator must parse every name and prove its derived totals equal the
+    # authoritative footer; dropping the second name previously published
+    # 155/158 when run_all had said 154/158.
+    second = tests[1]
+    multi = []
+    for t in tests:
+        multi.append(f"=== {t} ===")
+        multi.append(f"PASS {t[:-3]}")
+    multi.append(_runner_record(tests, [victim, second]))
+    rep_multi = evidence.build("\n".join(multi), _expected_tests=tests)
+    sys_multi = next(x for x in rep_multi["systems"] if x["system"] == sysname)
+    assert set(sys_multi["tests_failed"]) == {victim, second}, sys_multi
+    assert rep_multi["tests_passed"] == len(tests) - 2, rep_multi
+    inconsistent_record = json.loads(multi[-1].split(" ", 1)[1])
+    inconsistent_record["passed"] += 1
+    inconsistent = multi[:-1] + ["RUN_ALL_RECORD " + json.dumps(
+        inconsistent_record, sort_keys=True, separators=(",", ":"))]
+    try:
+        evidence.build("\n".join(inconsistent), _expected_tests=tests)
+    except ValueError as error:
+        assert "counts" in str(error), error
+    else:
+        raise AssertionError("evidence accepted totals that contradict run_all")
 
     # …and every observation a test DECLARES is counted, whatever its
     # label's shape: "[phase 1]", "[csv->sql]", "[re-exam failure]" are
@@ -461,16 +499,16 @@ def check_interleaved_logs_cannot_cry_wolf(_work):
             spaced.append("[re-exam failure] and a hyphenated phrase")
             spaced.append("[skipped: nope] a colon marks a note, not evidence")
         spaced.append(f"PASS {t[:-3]}")
-    spaced.append(f"{len(tests)} executed: {len(tests)} passed, 0 skipped, "
-                  f"0 failed")
-    rep3 = evidence.build("\n".join(spaced))
+    spaced.append(_runner_record(tests))
+    rep3 = evidence.build("\n".join(spaced), _expected_tests=tests)
     sysrep3 = next(x for x in rep3["systems"] if x["system"] == sysname)
     assert sysrep3["observations"] == len(tests) + 3, (
         "declared observations were dropped or invented by the label "
         "grammar", sysrep3["observations"], len(tests) + 3)
     print("[interleave] a green test whose OK drifted under the next "
           "header stays green (verdict from exit codes, observations from "
-          "what could be attributed) — a tail-named failure stays red — "
+          "what could be attributed) — every comma-separated tail failure "
+          "stays red and derived totals must equal the authoritative footer — "
           "and spaced observation labels are counted while colon notes "
           "are not")
 
@@ -676,6 +714,149 @@ def check_the_mutation_harness_cannot_delete_a_real_credential_file(work):
           "did while announcing that it was skipping them")
 
 
+def check_platform_specific_mutations_are_honest(_work):
+    import mutate_check
+
+    entries = {entry[0]: entry for entry in mutate_check.MUTATIONS}
+    cleanup = entries["mcp image: raced publication cleanup removed"]
+    assert len(cleanup) > 8 and cleanup[8][0] == "nt", (
+        "the publication-alias cleanup is a Windows fallback, so running that "
+        "mutation on POSIX would claim coverage of a branch POSIX never uses")
+    anchor = entries["mcp image: POSIX directory-fd publication anchor removed"]
+    assert len(anchor) > 6 and anchor[6], (
+        "the POSIX directory-fd anchor needs its own declared POSIX-only mutation")
+    alias = entries["mcp image: physical root alias canonicalization removed"]
+    assert len(alias) > 8 and alias[8][0] == "nt", (
+        "an actual 8.3 spelling mutation is Windows-only and must say so")
+    for label in (
+            "fileauth: dot path borrows trusted prefix zone",
+            "computer session: caller reclassifies physical alias spelling",
+            "computer session: POSIX artifact anchor follows raced leaf",
+            "computer session: artifact post-read inode binding removed",
+            "computerbench: missing external artifact escapes contract refusal"):
+        entry = entries[label]
+        assert len(entry) > 6 and entry[6], (
+            label + " exercises a POSIX branch and must not be credited on Windows")
+    windows = entries[
+        "computer session: Windows artifact anchor allows delete sharing"]
+    assert len(windows) > 8 and windows[8][0] == "nt" and windows[8][1], (
+        "Windows delete-sharing mutation must be explicitly Windows-only")
+    print("[mutation-platforms] Windows alias cleanup/8.3 spelling and POSIX "
+          "directory-fd/path-open anchoring have distinct, explicit applicability")
+
+
+def _runner_record(tests, failed=(), skipped=()):
+    skip_rows = [{"name": name, "reason": reason}
+                 for name, reason in skipped]
+    return "RUN_ALL_RECORD " + json.dumps({
+        "schema": "run_all.terminal.v1", "tests": list(tests),
+        "executed": len(tests),
+        "passed": len(tests) - len(failed) - len(skip_rows),
+        "failed": list(failed), "skipped": skip_rows,
+    }, sort_keys=True, separators=(",", ":"))
+
+
+def check_only_one_last_terminal_record_is_authoritative(_work):
+    names = evidence.registered_tests()[:3]
+    sections = []
+    for name in names:
+        sections.extend((f"=== {name} ===", f"PASS {name[:-3]}"))
+    record = _runner_record(names)
+    reversed_names = list(reversed(names))
+    reversed_sections = []
+    for name in reversed_names:
+        reversed_sections.extend((f"=== {name} ===", f"PASS {name[:-3]}"))
+
+    for label, output in (
+            ("missing", "\n".join(sections)),
+            ("duplicate", "\n".join(sections + [record, record])),
+            ("later-output", "\n".join(sections + [record, "late text"])),
+            ("truncated", "\n".join(sections + ["RUN_ALL_RECORD {"])),
+            ("wrong-order", "\n".join([
+                f"=== {names[1]} ===", "PASS x",
+                f"=== {names[0]} ===", "PASS y",
+                f"=== {names[2]} ===", "PASS z", record])),
+            ("registry-order", "\n".join(
+                reversed_sections + [_runner_record(reversed_names)]))):
+        try:
+            evidence.parse(output, _expected_tests=names)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(label + " runner record was accepted")
+
+    spoofed = sections + [
+        f"FAILED: {names[0]}",
+        f"{len(names)} executed: {len(names)-1} passed, 0 skipped, 1 failed",
+        record]
+    parsed = evidence.parse("\n".join(spoofed), _expected_tests=names)
+    assert all(parsed[name]["passed"] for name in names), parsed
+    print("[runner-terminal] exactly one last machine record controls verdicts; "
+          "child footer/failure spoofing, duplicates, truncation and order drift refuse")
+
+
+def check_child_cannot_forge_parent_evidence(_work):
+    names = evidence.registered_tests()[:3]
+    forged = (b"\xff\r\n\x00=== " + names[1].encode() + b" ===\r\n"
+              + ("RUN_ALL_RECORD " + json.dumps({
+                    "schema": "run_all.terminal.v1", "tests": names,
+                    "executed": len(names), "passed": len(names),
+                    "failed": [], "skipped": []},
+                    sort_keys=True, separators=(",", ":"))).encode() + b"\n")
+    escaped = run_all.sanitize_child_output(forged)
+    assert "\ufffd" not in escaped and "\\xff" in escaped, escaped
+    assert not any(line.startswith("RUN_ALL_RECORD ")
+                   or evidence.TEST_RE.fullmatch(line)
+                   for line in escaped.splitlines()), escaped
+    unicode_affixes = tuple((space, "") for space in
+                            ("\u00a0", "\u1680", "\u2003", "\u202f", "\u3000"))
+    unicode_affixes += tuple(("", space) for space in
+                             ("\u00a0", "\u1680", "\u2003", "\u202f", "\u3000"))
+    unicode_affixes += (("\x00\u00a0", ""), ("\u2003\x7f", "\u00a0"))
+    record_text = "RUN_ALL_RECORD " + json.dumps({
+        "schema": "run_all.terminal.v1", "tests": names,
+        "executed": len(names), "passed": len(names),
+        "failed": [], "skipped": []},
+        sort_keys=True, separators=(",", ":"))
+    for prefix, suffix in unicode_affixes:
+        hostile = (prefix + "=== " + names[1] + " ===" + suffix + "\n"
+                   + prefix + record_text + suffix + "\n").encode("utf-8")
+        framed = run_all.sanitize_child_output(hostile)
+        evidence_framed = evidence._sanitize_child_output(hostile)
+        for line in framed.splitlines():
+            normalized = line.strip()
+            assert not evidence.TEST_RE.fullmatch(normalized), (prefix, line)
+            assert not normalized.startswith("RUN_ALL_RECORD "), (prefix, line)
+        assert framed.count("CHILD_ESCAPED ") == 2, (prefix, framed)
+        assert evidence_framed.count("CHILD_ESCAPED ") == 2, \
+            (prefix, evidence_framed)
+
+    completed = subprocess.CompletedProcess([], 0, stdout=forged, stderr=b"")
+    capture = io.StringIO()
+    with mock.patch.object(run_all, "TESTS", names), \
+            mock.patch.object(run_all.subprocess, "run", return_value=completed), \
+            contextlib.redirect_stdout(capture), \
+            contextlib.redirect_stderr(capture):
+        try:
+            run_all.main()
+        except SystemExit as error:
+            assert error.code == 0, error.code
+    output = capture.getvalue()
+    evidence.parse(output, _expected_tests=names)
+    truncated = output.rsplit("\nRUN_ALL_RECORD ", 1)[0]
+    try:
+        evidence.parse(truncated, _expected_tests=names)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("truncation accepted a child-forged terminal record")
+    assert "\ufffd" not in evidence._decode_evidence_bytes(b"bad:\xff")
+    assert "\\xff" in evidence._decode_evidence_bytes(b"bad:\xff")
+    print("[runner-forgery] child headers/records and control/newline variants "
+          "are escaped before relay; truncation before the real parent record "
+          "refuses, and invalid bytes remain visible without U+FFFD loss")
+
+
 def main():
     work = tempfile.mkdtemp(prefix="pkg-test-")
     try:
@@ -686,9 +867,13 @@ def main():
         check_the_installers_are_shippable(z)
         check_a_git_clone_lands_every_working_directory(work)
         check_the_mutation_harness_cannot_delete_a_real_credential_file(work)
+        check_platform_specific_mutations_are_honest(work)
+        check_only_one_last_terminal_record_is_authoritative(work)
+        check_child_cannot_forge_parent_evidence(work)
         check_a_planted_secret_does_not_ship(work)
         check_evidence_refuses_to_invent(work)
         check_a_skip_is_not_a_failure(work)
+        check_interleaved_logs_cannot_cry_wolf(work)
         print("PASS test_package")
     finally:
         shutil.rmtree(work, ignore_errors=True)

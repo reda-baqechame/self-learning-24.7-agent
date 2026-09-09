@@ -19,15 +19,20 @@ Usage:
 """
 
 import argparse
+import datetime
 import json
 import os
+import re
 import sys
+import tempfile
 import tomllib
 import urllib.error
 import urllib.request
 
 HOME = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HOME)
+
+import locks
 
 # well-known rails, so "add" is one word instead of a URL hunt — and so a
 # key dropped into agent.env can be AUTO-WIRED (see detect() and
@@ -112,14 +117,42 @@ def detect(root=None):
 
 # ------------------------------------------------------------ settings i/o
 
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _key(value):
+    value = str(value)
+    return value if _BARE_KEY.fullmatch(value) else json.dumps(value, ensure_ascii=False)
+
+
 def _fmt(v):
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return str(v)
+    if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
+        return v.isoformat()
     if isinstance(v, list):
         return "[" + ", ".join(_fmt(x) for x in v) + "]"
-    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if isinstance(v, dict):
+        return "{ " + ", ".join(f"{_key(k)} = {_fmt(x)}"
+                                  for k, x in v.items()) + " }"
+    if not isinstance(v, str):
+        raise TypeError(f"unsupported TOML value: {type(v).__name__}")
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _emit_table(lines, path, table):
+    if path:
+        if lines:
+            lines.append("")
+        lines.append("[" + ".".join(_key(part) for part in path) + "]")
+    for key, value in table.items():
+        if not isinstance(value, dict):
+            lines.append(f"{_key(key)} = {_fmt(value)}")
+    for key, value in table.items():
+        if isinstance(value, dict):
+            _emit_table(lines, path + (key,), value)
 
 
 def load(root):
@@ -128,50 +161,44 @@ def load(root):
 
 
 def save(root, cfg):
-    """Write settings.toml from the parsed structure. The schema is ours and
-    small (tables of scalars, one nested table per provider, [agent.chain]),
-    so this round-trips safely — and it is written atomically."""
-    lines = ["# ----------------------------------------------------------------- agent",
-             "[agent]"]
-    agent = cfg.get("agent", {})
-    for k, v in agent.items():
-        if not isinstance(v, dict):
-            lines.append(f"{k} = {_fmt(v)}")
-    for k, v in agent.items():
-        if isinstance(v, dict):
-            lines += ["", f"[agent.{k}]"] + [f"{ik} = {_fmt(iv)}"
-                                             for ik, iv in v.items()]
-    lines += ["", "# ------------------------------------------------------------- providers",
-              "# Keys live in agent.env (api_key_env) — never in this file."]
-    for name, p in cfg.get("providers", {}).items():
-        lines += ["", f"[providers.{name}]"]
-        for k, v in p.items():
-            if not isinstance(v, dict):
-                lines.append(f"{k} = {_fmt(v)}")
-        for k, v in p.items():
-            if isinstance(v, dict):
-                lines += [f"[providers.{name}.{k}]"] + [f"{ik} = {_fmt(iv)}"
-                                                        for ik, iv in v.items()]
-    lines += ["", "# ----------------------------------------------------------------- roles"]
-    for name, r in cfg.get("roles", {}).items():
-        lines += ["", f"[roles.{name}]"] + [f"{k} = {_fmt(v)}"
-                                            for k, v in r.items()]
+    """Atomically write every parsed setting, including arbitrary roots and
+    nested tables.  Provider operations may change their requested fields;
+    they must not reinterpret or discard unrelated configuration."""
+    if not isinstance(cfg, dict):
+        raise TypeError("settings root must be a table")
+    lines = []
+    _emit_table(lines, (), cfg)
     text = "\n".join(lines) + "\n"
     # validate before replacing: a broken settings.toml would stop the expert
     tomllib.loads(text)
     p = os.path.join(root, "settings.toml")
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, p)
+    fd, tmp = tempfile.mkstemp(prefix="settings.toml.", suffix=".tmp", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     return text
+
+
+def _update(root, mutate):
+    """Serialize a complete read-modify-save transaction across processes."""
+    p = os.path.join(root, "settings.toml")
+    with locks.advisory_holding(p + ".update", timeout=20):
+        cfg = load(root)
+        result = mutate(cfg)
+        save(root, cfg)
+        return result
 
 
 # ------------------------------------------------------------ operations
 
 def add(root, name, base_url=None, key_env=None, native_tools=None,
         headers=None, prices=None):
-    cfg = load(root)
     if not base_url and name in KNOWN:
         p = rail(name)                        # expands URL placeholders and
         base_url = p["base_url"]              # names what is missing
@@ -187,9 +214,10 @@ def add(root, name, base_url=None, key_env=None, native_tools=None,
         p.update(prices)
     if headers:
         p["extra_headers"] = headers
-    cfg.setdefault("providers", {})[name] = p
-    save(root, cfg)
-    return p
+    def mutate(cfg):
+        cfg.setdefault("providers", {})[name] = p
+        return p
+    return _update(root, mutate)
 
 
 def catalog(root, name, filt="", free_only=False, limit=40):
@@ -232,22 +260,22 @@ def catalog(root, name, filt="", free_only=False, limit=40):
 def set_role(root, role, provider, model, fallback_provider=None,
              fallback_model=None, escalate_provider=None, escalate_model=None,
              tools=None):
-    cfg = load(root)
-    if provider not in cfg.get("providers", {}):
-        raise SystemExit(f"ERROR: unknown provider '{provider}' — add it first")
-    r = dict(cfg.get("roles", {}).get(role, {}))
-    r.update({"provider": provider, "model": model})
-    if fallback_provider:
-        r["fallback_provider"] = fallback_provider
-        r["fallback_model"] = fallback_model or model
-    if escalate_model:
-        r["escalate_provider"] = escalate_provider or provider
-        r["escalate_model"] = escalate_model
-    if tools is not None:
-        r["tools"] = tools
-    cfg.setdefault("roles", {})[role] = r
-    save(root, cfg)
-    return r
+    def mutate(cfg):
+        if provider not in cfg.get("providers", {}):
+            raise SystemExit(f"ERROR: unknown provider '{provider}' — add it first")
+        r = dict(cfg.get("roles", {}).get(role, {}))
+        r.update({"provider": provider, "model": model})
+        if fallback_provider:
+            r["fallback_provider"] = fallback_provider
+            r["fallback_model"] = fallback_model or model
+        if escalate_model:
+            r["escalate_provider"] = escalate_provider or provider
+            r["escalate_model"] = escalate_model
+        if tools is not None:
+            r["tools"] = tools
+        cfg.setdefault("roles", {})[role] = r
+        return r
+    return _update(root, mutate)
 
 
 def summary(root):

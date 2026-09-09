@@ -1,16 +1,99 @@
 # Expert Fleet
 
+> This branch is a bounded computer-use development candidate. The retained
+> 36-trial 12/15/9 result is historical evidence for the pre-review classifier,
+> which incorrectly let case names launder unreconciled `UNKNOWN` actions. It is
+> not current-source qualification. A fresh batch must report measured classes
+> without forcing old totals, and any unresolved trial keeps development
+> incomplete. This remains development-fixture coverage, not independent
+> acceptance, model competence or release readiness.
+> See [the phase contract](docs/DESIGN-bounded-computer-use.md).
+
+The bounded invoice click adapter now uses Playwright locator actionability.
+It requires an exact, visible, enabled, stable, hit-testable main-frame target,
+an unchanged host Page/Frame/document identity, and a fresh preflight. The
+legacy function name `playwright_atomic_click` is retained for callers, but
+trial and click are separate operations: page code can run between them. A
+successful input acknowledgment is `ACTION_DISPATCHED`, with a separate fresh
+`post_observation` and `workflow_verified: false`. Failed dispatch/readback is
+`UNKNOWN` and the consumed receipt cannot be retried.
+Blocked or empty observations remain available for recovery. An acknowledged
+click that opens a dialog or login form preserves `ACTION_DISPATCHED` and those
+post-observation flags; any follow-up click is refused before adapter entry.
+
+The owner must explicitly review `computer_locator_tool: "browser_run_code_unsafe"`
+and recompute `trust_identity`; the field is identity-bound. Missing/mismatched
+pins or missing opt-in refuse. This tool runs host JavaScript and is
+RCE-equivalent in Playwright MCP 0.0.79, so generic/model calls to both run-code
+spellings and the raw evaluator are denied on opted-in adapter servers. Only
+fixed host code builds the locator from the sealed bounded invoice ID. Existing
+server configurations are not automatically enabled. Retained element handles
+live on the host Page, are replaced on observation and disposed on navigation
+or close; website JavaScript cannot edit the host binding. Targets in child
+frames remain outside this adapter's action vocabulary.
+
+`tests/test_computeruse_live.py` is an opt-in synthetic Chromium fixture using
+the pinned MCP image and a disposable `--network=none` container, with no
+personal profile or provider. Set `AGENT_COMPUTER_LIVE=1` to run it; otherwise
+the suite explicitly reports a skip. It asserts exact activation counts for
+valid input, hidden/covered/disabled targets, detached/duplicate/moved/replaced
+nodes, frame transfer, same-URL page/tab replacement, and lost post-readback.
+These development checks do not establish production or cross-platform release
+readiness. A top-level origin check is not browser-network or redirect containment.
+
+`computer_open`, `computer_observe` and `computer_click` now share one task-owned
+session. The owner-reviewed server must declare
+`computer_policy: {"revision":"r1","allowed_origin":"https://example.com"}`
+and an updated trust identity. Every operation reloads that configuration.
+Action intents are fsynced before dispatch; an acknowledged click remains
+`DISPATCHED`, while ambiguous outcomes become `UNKNOWN` and block retry across
+the task lineage. Close/restart preserves unresolved history. Host-only
+`reconcile(action_id, decision, scope, evidence)` accepts `confirmed_effect`,
+`confirmed_no_effect`, or `authorize_retry`, with hashed CONTROL/RUNTIME evidence;
+it appends an owner attestation and never automatically verifies a workflow.
+
+Task sessions own a supervisor and exclusive persistent OS lease. Windows Jobs
+close descendants; POSIX supervision supports children that stay in the owned
+process group. Docker sessions require a disposable network-none container with
+runtime-owned name/cidfile and explicit exact-ID cleanup readback. Unproven
+startup/cleanup retains taint. Attached browsers/external profiles are unsupported.
+The additional local session test includes real child/grandchild termination and,
+with `AGENT_COMPUTER_LIVE=1`, a pinned Chromium session/container cleanup check.
+These tests do not establish cross-OS qualification or general network containment.
+
+`computerbench.py` is development-only and its `acceptance` command always
+fails closed. Production challenge and acceptance are owned by the separate
+`computerbench_verifier.py` installation template. An OS administrator must
+install that verifier at its fixed `/opt` path, root-owned and non-writable,
+with the shipped root-owned `computerbench-verifier` launcher. Only that launcher
+is executable: it uses fixed `/usr/bin/python3 -I -S` under an empty, allowlisted
+environment, while the verifier source itself is non-executable and refuses a
+direct or non-isolated entry. This prevents worker `PATH`, `PYTHONPATH`, user-site
+and `sitecustomize` code from running before verifier validation. A fixed
+root-owned public trust store and verifier-owned challenge state accompany it;
+it runs under a dedicated nonroot verifier UID distinct from the worker.
+The verifier accepts an inert `package.py` ZIP, never imports or executes its
+code, and binds its exact archive bytes, safely parsed member manifest (including
+synthesized `.gitkeep` members), runtime/config digests, verifier build, public
+trust metadata, frozen settings and durable one-run challenge. Distinct issuer
+and evaluator RSA public keys verify the external pack and results. The shipped
+template is not installed authority, its internal fixture cannot set acceptance
+true, Windows fails closed, and no external pack/results exist, so
+`acceptance_complete=false` and `release_ready=false`. DOM observation and input
+dispatch are not business success. Immutable MCP image storage is not model-vision
+transport, and the text context budget still rejects non-text multimodal input.
+
 **A file-backed, stdlib-only platform for building expert AI agents that work
 continuously, prove what they did, and remember what they learned.**
 
 [![tests](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
-![tests](https://img.shields.io/badge/tests-155%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-65%20registered-blue)
+![tests](https://img.shields.io/badge/tests-160%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-215%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
-118 Python modules · 155 registered acceptance tests · one HTML control panel · no
+124 Python modules · 160 registered acceptance tests · one HTML control panel · no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 ```bash
@@ -153,7 +236,7 @@ are laws with tests that would fail, not features with descriptions.**
 
 | Property | The well-known harnesses | Expert Fleet |
 |---|---|---|
-| Who says "done"? | the model or its framework judges its own run | frozen, caller-authored graders sealed before planning, run only by the harness; even the judge is overruled when they disagree — **56/56 mutation-tested laws** |
+| Who says "done"? | the model or its framework judges its own run | frozen, caller-authored graders sealed before planning, run only by the harness; even the judge is overruled when they disagree — **60/60 mutation-tested laws** |
 | Self-improvement | trust the loop to compound | validation-gated: a procedure is PROVEN only after 3 wins in which its own steps verified **and the caller's independent acceptance test passed afterwards**; oscillation stops the lane; drafts refuse to run — matching what the 2026 fragility literature demands |
 | Learn by demonstration | recorded, then trusted | `runbook.py record`: recorded → **CANDIDATE**; a rehearsal replays the demo through the full authority stack, which proves the recording RUNS and earns no trust — a procedure grading its own replay is still the procedure grading itself; a demo you watched is a claim, a demo the *caller's* graders accepted is evidence |
 | Security | wrapper products exist *because* the frameworks need wrapping (see the published security analyses of the popular ones) | six mandatory authorities inside the platform — Execution, File, Credential, Model Gateway, Effect, Control Plane — `--audit` at 0 bypasses **in CI**, a worker that cannot change its own authority even through a shell, plus directive-shaped memory flagged at the source |
@@ -162,7 +245,7 @@ are laws with tests that would fail, not features with descriptions.**
 | Long context | a bigger window | **recursive sub-calls** (the RLM result, MIT 2025): the material never enters the window — slices go to disposable sub-calls on the cheapest rail, only distilled answers return, metered and contained like every call |
 | New tools | a fixed integration catalogue, or an agent that installs what it likes | **the capability frontier**: an agent may PROPOSE a tool it lacks, never author the test — it declares an import or a binary, the *platform* generates the probe, and the probe must FAIL before anything is installed. Readiness is decided by a seal outside the agent's reach, and a human adopts it from a terminal |
 | Knowing what a goal needs | a prompt asking the model to list its tools | two measured corpora, 50 goals across 40+ trades, pinned as tests. The broad set went **24% → 100%** honest coverage; the adversarial set found that **5 goals carrying irreversible physical or financial effects did not stop for the owner** — cutting power to a heater, changing a CNC feed rate, filing a claim in your name — because every authority rule was about a digital permission and none about a machine that moves. Now 0 |
-| Dependencies | large stacks | Python stdlib. Zero. 155 registered tests; six CI configurations |
+| Dependencies | large stacks | Python stdlib. Zero. 160 registered tests; six configured CI jobs (current results must be inspected separately) |
 | Your state | often hosted, often theirs | files you own, provider-universal (any key, or a zero-key local model) — the model is a swappable part; the memory, graders, runbooks and ledgers are the asset |
 
 Four shipped archetypes cover the famous products' ground on this
@@ -221,8 +304,8 @@ control defends the path its author was thinking about, and does not know
 about the other paths.* Six places executed shell; one was tested. The answer
 is one mandatory gateway per kind of power — Execution, File, Credential,
 Model Gateway, Effect, Control Plane — and `python execution.py --audit`
-fails the build if any module bypasses one. Today: **0 violations across 118
-modules**, 18 declared platform-internal.
+fails the build if any module bypasses one. Today: **0 violations across 124
+modules**, 19 declared platform-internal.
 
 The sixth arrived the same way the pattern predicts. A later audit asked what
 the first five answered *between* them, and found nothing there: the File
@@ -454,7 +537,7 @@ was wrong.
 
 **The tests enumerate rather than exemplify.** `tests/test_invariants.py`
 does not test through an example — it walks the tree: every subprocess call
-site in 118 modules, every declared control file, 12 traversal spellings, all
+site in 124 modules, every declared control file, 12 traversal spellings, all
 4 credential sources against every subsystem that must exclude them, all 9
 provider-call purposes, all 9 roles, every module that mints an expert, every
 reader of the exam file, the sandbox names across all test files, all
@@ -465,7 +548,8 @@ silent staleness bugs were found at once rather than one at a time.
 **Mutation testing — 0 missed.** A passing test proves nothing unless it
 would fail with the feature removed. `mutate_check.py` breaks each
 load-bearing behaviour and requires its test to fail. Representative rows
-and the complete local total are shown here:
+and the historical local receipt at merged workflow commit `d629955` are
+shown here; they are not the current integrated-tree total:
 
 ```
 CAUGHT  docker: egress allowed by default
@@ -503,13 +587,14 @@ and only one was being checked: whether the test failed, and whether it
 failed **for the reason claimed**. A shared skip reason was the same mistake
 one level up, so each row now carries its own.
 
-Mutation results are host-specific. The current checked result is:
+Mutation results are host-specific. The last workflow-only receipt before the
+computer-use union was:
 
 | Where | Result |
 |---|---|
-| Windows | 65 mutations: **62 caught, 0 missed**, 3 refused (POSIX-only) |
+| Windows at `d629955` | 65 mutations: **62 caught, 0 missed**, 3 refused (POSIX-only) |
 
-Linux and CI must publish their own totals; this local result does not claim
+Linux and CI must publish their own totals; this historical result does not claim
 those environments. Splitting that hair is the point — an earlier Linux
 total was written here before a runner had said so and had to be taken back
 out. That is exactly the reflex [U21](GAPS_RISKS_AND_UNFINISHED.md) records.
@@ -584,7 +669,7 @@ build is cleared.** The full table is in
 
 ```bash
 python demo.py            # the whole platform, keyless, in one run
-python tests/run_all.py   # 155 registered acceptance tests
+python tests/run_all.py   # 160 registered acceptance tests
 python proof.py           # what is proven, and to what level
 python evidence.py        # why we believe it, and where belief runs out
 python metrics.py         # is it working — and the numbers it refuses to invent

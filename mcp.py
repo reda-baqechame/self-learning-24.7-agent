@@ -13,10 +13,12 @@ Tool results are fenced as untrusted data, not instructions.
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -24,6 +26,9 @@ import time
 
 LEGACY_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "expert-fleet", "version": "1.0"}
+MAX_PENDING_REQUESTS = 64
+MAX_FRAME_CHARS = 4_194_304
+READER_JOIN_TIMEOUT_SECONDS = 2.0
 
 # An allowlist, not a secret-name blacklist: unknown variables never leak.
 # HOME is needed by package runners but grants no environment credentials.
@@ -53,7 +58,7 @@ def server_environment(spec, environ=None):
 def server_identity(spec):
     """Identity of owner-approved code/config, never the raw credential."""
     fields = ("cmd", "args", "shell", "version", "integrity", "source",
-              "env_allow", "env")
+              "env_allow", "env", "atomic_browser_adapter", "computer_locator_tool", "computer_policy")
     blob = json.dumps({k: spec[k] for k in fields if k in spec},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -81,75 +86,142 @@ def find_config(root):
 
 
 def load_servers(root):
+    return config_snapshot(root)[0]
+
+
+def config_snapshot(root):
+    """Load one exact source and its physical/content identity together."""
     p = find_config(root)
     if not p:
-        return {}
-    with open(p, "r", encoding="utf-8-sig") as f:
-        return (json.load(f).get("servers") or {})
+        return {}, None
+    with open(p, "rb") as f:
+        raw=f.read()
+    source={'path':os.path.abspath(p),'physical':os.path.realpath(p),
+            'sha256':hashlib.sha256(raw).hexdigest()}
+    return (json.loads(raw.decode('utf-8-sig')).get('servers') or {}),source
 
 
 class Server:
     """One spawned MCP server over stdio, newline-delimited JSON-RPC."""
 
-    def __init__(self, name, spec, cwd=None, timeout=30):
+    def __init__(self, name, spec, cwd=None, timeout=30, owned_process=None):
         self.name = name
         self.timeout = timeout
         cmd = [spec["cmd"]] + list(spec.get("args") or [])
         validate_identity(spec)
         env = server_environment(spec)
+        self.owned_process = owned_process
+        if owned_process is not None:
+            import computerprocess
+            cmd=computerprocess.command(spec,*owned_process)
         self.proc = subprocess.Popen(
             cmd, cwd=cwd, env=env, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", bufsize=1,
+            start_new_session=owned_process is not None and os.name!='nt',
             shell=isinstance(spec["cmd"], str) and os.name == "nt"
             and spec.get("shell", False))
         self._id = 0
         self._era = None          # set only after a supported handshake
+        self._send_lock = threading.Lock()
+        self._id_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending = {}
+        self._terminal_error = None
+        self._reader = threading.Thread(target=self._read_frames, daemon=True,
+                                        name=f"mcp-reader-{self.proc.pid}")
+        self._reader.start()
 
     # --- plumbing -------------------------------------------------------
-    def _send(self, msg):
-        self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        self.proc.stdin.flush()
+    def _send(self, msg, before_send=None):
+        with self._send_lock:
+            with self._pending_lock:
+                if self._terminal_error is not None:
+                    raise RuntimeError(self._terminal_error)
+            try:
+                if before_send is not None:
+                    before_send()
+                self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+            except (OSError, ValueError) as exc:
+                self._terminate("MCP transport closed during send")
+                raise RuntimeError(self._terminal_error) from exc
 
-    def _read_response(self, want_id):
-        """Read frames until the response with our id arrives; a reader
-        thread + join gives us a real timeout on a wedged server."""
-        box = {}
+    def _terminate(self, error):
+        """Publish one stable terminal failure and wake every registered call."""
+        with self._pending_lock:
+            if self._terminal_error is None:
+                self._terminal_error = error
+            for slot in self._pending.values():
+                slot["error"] = self._terminal_error
+                slot["event"].set()
+            self._pending.clear()
 
-        def reader():
+    def _read_frames(self):
+        """The only stdout owner for this process, including after a timeout."""
+        try:
             while True:
-                line = self.proc.stdout.readline()
+                line = self.proc.stdout.readline(MAX_FRAME_CHARS + 1)
                 if not line:
-                    box["error"] = "server closed the pipe"
+                    self._terminate("MCP server closed the pipe")
                     return
-                line = line.strip()
-                if not line:
+                if len(line) > MAX_FRAME_CHARS or not line.endswith("\n"):
+                    self._terminate("MCP frame oversized or unterminated")
+                    return
+                if not line.strip():
                     continue
                 try:
                     msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if msg.get("id") == want_id:
-                    box["msg"] = msg
+                except (ValueError, RecursionError):
+                    self._terminate("MCP malformed JSON frame")
                     return
-                # notifications and foreign ids are ignored
+                if not isinstance(msg, dict):
+                    self._terminate("MCP malformed response frame")
+                    return
+                # Notifications, server requests and late/foreign IDs have no
+                # pending response owner. Do not retain any of their data.
+                if "method" in msg or "id" not in msg:
+                    continue
+                if type(msg["id"]) is not int:
+                    continue
+                with self._pending_lock:
+                    slot = self._pending.pop(msg["id"], None)
+                    if slot is not None:
+                        slot["msg"] = msg
+                        slot["event"].set()
+        except (OSError, ValueError):
+            self._terminate("MCP transport closed while reading a frame")
 
-        t = threading.Thread(target=reader, daemon=True)
-        t.start()
-        t.join(self.timeout)
-        if "msg" in box:
-            return box["msg"]
-        raise TimeoutError(box.get("error")
-                           or f"no response from '{self.name}' within "
-                              f"{self.timeout}s")
-
-    def _rpc(self, method, params=None):
-        self._id += 1
-        msg = {"jsonrpc": "2.0", "id": self._id, "method": method}
+    def _rpc(self, method, params=None, before_send=None):
+        with self._id_lock:
+            self._id += 1
+            request_id = self._id
+        slot = {"event": threading.Event()}
+        with self._pending_lock:
+            if self._terminal_error is not None:
+                raise RuntimeError(self._terminal_error)
+            if len(self._pending) >= MAX_PENDING_REQUESTS:
+                raise RuntimeError("MCP pending request capacity reached")
+            self._pending[request_id] = slot
+        msg = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
             msg["params"] = params
-        self._send(msg)
-        resp = self._read_response(self._id)
+        try:
+            if before_send is None:
+                self._send(msg)
+            else:
+                self._send(msg, before_send=before_send)
+            slot["event"].wait(self.timeout)
+            with self._pending_lock:
+                if "error" in slot:
+                    raise RuntimeError(slot["error"])
+                if "msg" not in slot:
+                    raise TimeoutError(f"no response from '{self.name}' within "
+                                       f"{self.timeout}s")
+                resp = slot["msg"]
+        finally:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
         if "error" in resp:
             raise RuntimeError(f"{method} failed: "
                                f"{resp['error'].get('message')} "
@@ -181,20 +253,29 @@ class Server:
             self.tools()
         return self._tool_index.get(name)
 
-    def call(self, tool, arguments):
+    def call(self, tool, arguments, before_send=None):
         return self._rpc("tools/call",
-                         {"name": tool, "arguments": arguments or {}})
+                         {"name": tool, "arguments": arguments or {}},
+                         before_send=before_send)
 
     def close(self):
+        self._terminate("MCP transport closed by client")
+        if self.owned_process is not None:
+            import computerprocess
+            computerprocess.cleanup(*self.owned_process)
+        deadline = time.monotonic() + READER_JOIN_TIMEOUT_SECONDS
+        # Kill before touching the pipe locks: a server that stopped reading
+        # stdin can have a sender blocked in write/flush. Killing releases it.
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(max(0, deadline - time.monotonic()))
+        self._reader.join(max(0, deadline - time.monotonic()))
+        if self._reader.is_alive():
+            raise RuntimeError("MCP reader did not stop within close timeout")
         try:
             self.proc.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
-        try:
-            self.proc.wait(3)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait(3)
         self.proc.stdout.close()
 
 
@@ -279,7 +360,7 @@ def _tool_allowed(spec, tool):
     return (not allow) or (tool in allow)
 
 
-def connect(root, name, timeout=30, role=None):
+def connect(root, name, timeout=30, role=None, owned_process=None):
     servers = load_servers(root)
     if name not in servers:
         known = ", ".join(sorted(servers)) or "none configured"
@@ -290,7 +371,8 @@ def connect(root, name, timeout=30, role=None):
         raise SystemExit(f"MCP server '{name}' is not allowed for role "
                          f"'{role}' (allow_roles in mcp.json). This is the "
                          f"owner's policy, not a bug.")
-    s = Server(name, servers[name], cwd=root, timeout=timeout)
+    s = (Server(name, servers[name], cwd=root, timeout=timeout,owned_process=owned_process)
+         if owned_process is not None else Server(name, servers[name], cwd=root, timeout=timeout))
     s.spec = servers[name]
     try:
         s.handshake()
@@ -339,7 +421,7 @@ _URL_KEYS = ("url", "uri", "href", "link", "src", "endpoint", "address",
              "target", "page", "location")
 
 
-def _bad_url_argument(arguments, root=None, _depth=0):
+def _bad_url_argument(arguments, root=None, _depth=0, tool=None):
     """The refusal text if any argument points somewhere it must not, else "".
 
     Reuses ingest.py's guards rather than writing a second pair that can
@@ -369,7 +451,9 @@ def _bad_url_argument(arguments, root=None, _depth=0):
             continue
         if not isinstance(v, str) or not v.strip():
             continue
-        looks_urlish = (str(k).lower() in _URL_KEYS
+        selector_target = (_depth == 0 and tool == "browser_click" and k == "target"
+                           and not re.match(r"^[a-z][a-z0-9+.-]*:|^//", v.strip(), re.I))
+        looks_urlish = ((str(k).lower() in _URL_KEYS and not selector_target)
                         or re.match(r"^[a-z][a-z0-9+.-]*://", v.strip(), re.I))
         if not looks_urlish:
             continue
@@ -394,7 +478,19 @@ def _nullcontext():
     return nullcontext()
 
 
-def guarded_call(s, tool, arguments, root=None, fresh=False):
+_COMPUTER_AUTHORITY = object()
+
+
+def computer_guarded_call(s, tool, arguments, root=None, fresh=False,
+                          task_context=None, before_send=None):
+    """Platform computer adapter entry; not exposed by the MCP CLI."""
+    return guarded_call(s, tool, arguments, root=root, fresh=fresh,
+                        _authority=_COMPUTER_AUTHORITY,
+                        _task_context=task_context, _before_send=before_send)
+
+
+def guarded_call(s, tool, arguments, root=None, fresh=False, _authority=None,
+                 _task_context=None, _before_send=None):
     """tools/call through the owner's policy AND the effects ledger:
     denied tools never reach the server; identical calls inside one task
     lineage are replayed from the ledger instead of hitting the world twice
@@ -404,6 +500,12 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
         return {"isError": True, "content": [{"type": "text", "text":
                 f"tool '{tool}' is denied for server '{s.name}' by mcp.json "
                 f"policy"}]}, "denied"
+    spec = getattr(s, "spec", {}) or {}
+    if (spec.get("atomic_browser_adapter") is True and tool in ("browser_evaluate", "browser_run_code", "browser_run_code_unsafe")
+            and _authority is not _COMPUTER_AUTHORITY):
+        return {"isError": True, "content": [{"type": "text", "text":
+                "raw browser code is denied for a bounded-adapter server; "
+                "use the sealed computer authority path"}]}, "denied"
     # WHERE the tool is being pointed, not just WHICH tool it is.
     #
     # This function screened the tool NAME, the effects ledger and the risk
@@ -419,12 +521,16 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
     # `browser_control` is a promoted capability, so `browser_navigate` with
     # a file:// or link-local URL is a live path to the same incident this
     # repository has already had once, on a rail with no checks at all.
-    bad = _bad_url_argument(arguments, root or os.environ.get("AGENT_ROOT"))
+    bad = _bad_url_argument(arguments, root or os.environ.get("AGENT_ROOT"), tool=tool)
     if bad:
         return {"isError": True, "content": [{"type": "text", "text": bad}]}, "denied"
     root = root or os.environ.get("AGENT_ROOT") or os.getcwd()
     lineage = os.environ.get("AGENT_TASK_LINEAGE") or "manual"
     task_id = os.environ.get("AGENT_TASK_ID", "-")
+    if _task_context is not None:
+        if _authority is not _COMPUTER_AUTHORITY:
+            raise ValueError("explicit computer identity requires internal authority")
+        task_id, lineage = _task_context["task_id"], _task_context["lineage"]
     import effects
     import locks
     key = effects.key_of(lineage, s.name, tool, arguments)
@@ -447,7 +553,6 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
                 return prior["result"], "replayed"
         # the human in the loop, as a mechanism: risky calls pause for the
         # owner and resume exactly once after approval
-        spec = getattr(s, "spec", {}) or {}
         risk = classify(spec, s.tool_def(tool))
         if needs_approval(spec, risk, tool):
             import approvals
@@ -488,19 +593,223 @@ def guarded_call(s, tool, arguments, root=None, fresh=False):
                         f"owner clears it in the effects ledger."}]}, \
                     "unresolved"
             effects.begin(root, key, task_id, s.name, tool, arguments)
-    result = s.call(tool, arguments)
+    result = (s.call(tool, arguments, before_send=_before_send)
+              if _before_send is not None else s.call(tool, arguments))
     if key:
         effects.record(root, key, task_id, s.name, tool, arguments, result,
                        is_error=bool(result.get("isError")))
     return result, "live"
 
 
-_IMG_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
-            "image/webp": ".webp", "image/gif": ".gif"}
+_MAX_BLOB_BYTES = 25_000_000
+_MAX_DIMENSION_SCAN = 65_536
+
+
+def _image_dimensions(raw, mime):
+    """Return bounded header dimensions for supported image encodings."""
+    if mime == "image/png":
+        if (len(raw) >= 24 and raw[:8] == b"\x89PNG\r\n\x1a\n"
+                and raw[12:16] == b"IHDR"):
+            width = int.from_bytes(raw[16:20], "big")
+            height = int.from_bytes(raw[20:24], "big")
+            if width and height:
+                return width, height
+        return None, None
+
+    if mime in ("image/jpeg", "image/jpg"):
+        data = memoryview(raw)[:_MAX_DIMENSION_SCAN]
+        if len(data) < 4 or bytes(data[:2]) != b"\xff\xd8":
+            return None, None
+        i = 2
+        sof = {0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+               0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf}
+        while i + 1 < len(data):
+            if data[i] != 0xff:
+                i += 1
+                continue
+            while i < len(data) and data[i] == 0xff:
+                i += 1
+            if i >= len(data):
+                break
+            marker = data[i]
+            i += 1
+            if marker == 0x00 or marker == 0x01 or 0xd0 <= marker <= 0xd9:
+                continue
+            if i + 2 > len(data):
+                break
+            segment_size = int.from_bytes(data[i:i + 2], "big")
+            if segment_size < 2 or i + segment_size > len(data):
+                break
+            if marker in sof and segment_size >= 7:
+                height = int.from_bytes(data[i + 3:i + 5], "big")
+                width = int.from_bytes(data[i + 5:i + 7], "big")
+                if width and height:
+                    return width, height
+                break
+            i += segment_size
+        return None, None
+
+    if mime == "image/webp":
+        data = memoryview(raw)[:_MAX_DIMENSION_SCAN]
+        if (len(data) < 20 or bytes(data[:4]) != b"RIFF"
+                or bytes(data[8:12]) != b"WEBP"):
+            return None, None
+        kind = bytes(data[12:16])
+        chunk_size = int.from_bytes(data[16:20], "little")
+        if kind == b"VP8X" and chunk_size >= 10 and len(data) >= 30:
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+            return width, height
+        if (kind == b"VP8 " and chunk_size >= 10 and len(data) >= 30
+                and bytes(data[23:26]) == b"\x9d\x01\x2a"):
+            width = int.from_bytes(data[26:28], "little") & 0x3fff
+            height = int.from_bytes(data[28:30], "little") & 0x3fff
+            return (width, height) if width and height else (None, None)
+        if (kind == b"VP8L" and chunk_size >= 5 and len(data) >= 25
+                and data[20] == 0x2f):
+            bits = int.from_bytes(data[21:25], "little")
+            return (bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1
+    return None, None
+
+
+def _image_info(raw):
+    """Derive canonical type, safe extension, and dimensions from bytes."""
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime, ext = "image/png", ".png"
+    elif raw.startswith(b"\xff\xd8"):
+        mime, ext = "image/jpeg", ".jpg"
+    elif (len(raw) >= 12 and raw[:4] == b"RIFF"
+          and raw[8:12] == b"WEBP"):
+        mime, ext = "image/webp", ".webp"
+    elif raw.startswith((b"GIF87a", b"GIF89a")):
+        mime, ext = "image/gif", ".gif"
+    else:
+        return None
+    width, height = _image_dimensions(raw, mime)
+    return mime, ext, width, height
+
+
+def _artifact_info(raw, block_type, declared):
+    """Classify bytes without deriving any filesystem suffix from a declaration."""
+    image = _image_info(raw)
+    if image is not None:
+        mime, ext, width, height = image
+        normalized = "image/jpeg" if declared == "image/jpg" else declared
+        return image if not normalized or normalized == mime else None
+    if block_type == "image" or declared.startswith("image/"):
+        return None
+    if (len(raw) >= 12 and raw[:4] == b"RIFF"
+            and raw[8:12] == b"WAVE"):
+        if declared and declared not in {"audio/wav", "audio/x-wav"}:
+            return None
+        return "audio/wav", ".wav", None, None
+    return "application/octet-stream", ".bin", None, None
+
+
+def _artifact_directory(root):
+    """Create and return the physical, unredirected expert-local directory."""
+    import fileauth
+    root_real = os.path.realpath(root or ".")
+    rel = "tmp/mcp-artifacts"
+    expected = os.path.join(root_real, "tmp", "mcp-artifacts")
+
+    def resolved():
+        got = fileauth.resolve(root_real, rel, "write", "harness",
+                               allow_zones={fileauth.ZONE_ROOT})
+        if os.path.normcase(os.path.abspath(got)) != \
+                os.path.normcase(os.path.abspath(expected)):
+            raise fileauth.Denied("MCP artifact directory is redirected")
+
+    resolved()
+    os.makedirs(expected, exist_ok=True)
+    resolved()  # catch a parent redirect installed during creation
+    for path in (os.path.join(root_real, "tmp"), expected):
+        info = os.lstat(path)
+        is_junction = getattr(os.path, "isjunction", lambda _p: False)(path)
+        if (not stat.S_ISDIR(info.st_mode) or os.path.islink(path)
+                or is_junction):
+            raise fileauth.Denied("MCP artifact directory is redirected")
+    info = os.lstat(expected)
+    return expected, (info.st_dev, info.st_ino)
+
+
+def _stable_artifact_directory(root, path, identity):
+    """Re-resolve after race windows and require the same real directory."""
+    import fileauth
+    try:
+        current, current_identity = _artifact_directory(root)
+    except (OSError, fileauth.Denied):
+        return False
+    return (os.path.normcase(current) == os.path.normcase(path)
+            and current_identity == identity)
+
+
+def _read_immutable_target(path, raw):
+    """Read only one stable, regular, singly-linked existing digest target."""
+    try:
+        before = os.lstat(path)
+        is_junction = getattr(os.path, "isjunction", lambda _p: False)(path)
+        if (not stat.S_ISREG(before.st_mode) or os.path.islink(path)
+                or is_junction or before.st_nlink != 1):
+            return False
+        with open(path, "rb") as f:
+            opened = os.fstat(f.fileno())
+            data = f.read(len(raw) + 1)
+        after = os.lstat(path)
+    except OSError:
+        return False
+    identities = {(s.st_dev, s.st_ino) for s in (before, opened, after)}
+    return (len(identities) == 1 and stat.S_ISREG(opened.st_mode)
+            and opened.st_nlink == 1 and after.st_nlink == 1 and data == raw)
+
+
+def _validated_artifact(root, directory, identity, path, raw, metadata):
+    """The only success gate: verify target first, then physical directory."""
+    if not _read_immutable_target(path, raw):
+        return None
+    if not _stable_artifact_directory(root, directory, identity):
+        return None
+    return metadata
+
+
+def _remove_published_alias(path, temporary):
+    """Remove only the just-linked alias when a directory race is detected."""
+    try:
+        target_info = os.lstat(path)
+        temp_info = os.lstat(temporary)
+        if ((target_info.st_dev, target_info.st_ino) ==
+                (temp_info.st_dev, temp_info.st_ino)
+                and stat.S_ISREG(target_info.st_mode)
+                and target_info.st_nlink >= 2):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _publication_directory(root, path, identity):
+    """Anchor POSIX publication; require Windows identity revalidation."""
+    if os.name == "nt":
+        if not _stable_artifact_directory(root, path, identity):
+            raise OSError("MCP artifact directory changed before publication")
+        yield None
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        opened = os.fstat(directory_fd)
+        if ((opened.st_dev, opened.st_ino) != identity
+                or not _stable_artifact_directory(root, path, identity)):
+            raise OSError("MCP artifact directory changed before publication")
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
 
 
 def _save_blob(root, c, n):
-    """Write a non-text content block to tmp/ and return its relative path.
+    """Store a non-text block as an immutable expert-local artifact.
 
     An image block used to be replaced with "[image content omitted]" and
     thrown away. That is the difference between a browser that can act and a
@@ -520,30 +829,101 @@ def _save_blob(root, c, n):
     saying what was withheld rather than pretending.
     """
     import base64
+    import fileauth
     data = c.get("data") or c.get("blob")
     if not data or not isinstance(data, str):
         return None
-    mime = str(c.get("mimeType") or c.get("mime_type") or "")
-    ext = _IMG_EXT.get(mime.lower(), ".bin")
+    encoded_size = len(data)
+    if encoded_size % 4:
+        return None
+    padding = int(data.endswith("=")) + int(data.endswith("=="))
+    if encoded_size // 4 * 3 - padding > _MAX_BLOB_BYTES:
+        return None
     try:
         raw = base64.b64decode(data, validate=True)
     except Exception:
         return None
-    if not raw or len(raw) > 25_000_000:      # a tool result is untrusted input
+    if not raw or len(raw) > _MAX_BLOB_BYTES:  # a tool result is untrusted input
         return None
-    d = os.path.join(root or ".", "tmp")
+    block_type = str(c.get("type") or "").strip().lower()
+    declared = str(c.get("mimeType") or c.get("mime_type") or "").strip().lower()
+    artifact = _artifact_info(raw, block_type, declared)
+    if artifact is None:
+        return None
+    mime, ext, width, height = artifact
+    digest = hashlib.sha256(raw).hexdigest()
+    name = digest + ext
+    rel = f"tmp/mcp-artifacts/{name}"
+    metadata = {"path": rel, "sha256": digest, "bytes": len(raw),
+                "mime": mime, "width": width, "height": height}
     try:
-        os.makedirs(d, exist_ok=True)
-        name = f"mcp-{int(time.time())}-{n}{ext}"
-        with open(os.path.join(d, name), "wb") as f:
-            f.write(raw)
-    except OSError:
+        d, directory_identity = _artifact_directory(root)
+        path = os.path.join(d, name)
+        if os.path.lexists(path):
+            return _validated_artifact(
+                root, d, directory_identity, path, raw, metadata)
+        import tempfile
+        fd, temporary = tempfile.mkstemp(prefix=f".{digest}-", suffix=".tmp",
+                                         dir=d)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+                f.flush()
+                os.fsync(f.fileno())
+            temp_info = os.lstat(temporary)
+            if (not stat.S_ISREG(temp_info.st_mode) or temp_info.st_nlink != 1
+                    or not _stable_artifact_directory(
+                        root, d, directory_identity)):
+                return None
+            with _publication_directory(root, d, directory_identity) as dir_fd:
+                try:
+                    try:
+                        # A hard-link publication is atomic and cannot replace
+                        # a name another writer published first. POSIX anchors
+                        # both names to the validated directory descriptor;
+                        # Windows immediately revalidates and removes only the
+                        # just-linked alias if a parent changed meanwhile.
+                        if dir_fd is None:
+                            os.link(temporary, path)
+                            target_info = os.lstat(path)
+                        else:
+                            os.link(os.path.basename(temporary), name,
+                                    src_dir_fd=dir_fd, dst_dir_fd=dir_fd,
+                                    follow_symlinks=False)
+                            target_info = os.stat(
+                                name, dir_fd=dir_fd, follow_symlinks=False)
+                    except FileExistsError:
+                        return _validated_artifact(
+                            root, d, directory_identity, path, raw, metadata)
+                    if ((target_info.st_dev, target_info.st_ino) !=
+                            (temp_info.st_dev, temp_info.st_ino)
+                            or not _stable_artifact_directory(
+                                root, d, directory_identity)):
+                        _remove_published_alias(path, temporary)
+                        return None
+                finally:
+                    try:
+                        if dir_fd is None:
+                            os.unlink(temporary)
+                        else:
+                            os.unlink(os.path.basename(temporary), dir_fd=dir_fd)
+                        temporary = None
+                    except FileNotFoundError:
+                        pass
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+        return _validated_artifact(
+            root, d, directory_identity, path, raw, metadata)
+    except (OSError, fileauth.Denied):
         return None
-    return f"tmp/{name}", len(raw), mime or "unknown"
 
 
-def render_result(result, root=None):
-    """Flatten an MCP tool result to fenced text. isError stays loud."""
+def render_result(result, root=None, artifacts=None):
+    """Flatten a result; optionally retain artifact metadata independently."""
     parts = []
     for i, c in enumerate(result.get("content", [])):
         if c.get("type") == "text":
@@ -551,10 +931,13 @@ def render_result(result, root=None):
         else:
             saved = _save_blob(root, c, i)
             if saved:
-                rel, size, mime = saved
+                if artifacts is not None:
+                    artifacts.append(dict(saved))
+                rel = saved["path"]
+                metadata = json.dumps(saved, separators=(",", ":"))
                 parts.append(
                     f"[{c.get('type', 'binary')} content saved to {rel} "
-                    f"({size:,} bytes, {mime}) — it is NOT in this text. To "
+                    f"with immutable metadata {metadata} — it is NOT in this text. To "
                     f"read it: run_command "
                     f"`python ingest.py vision {rel} out/seen-{i}.md` and then "
                     f"read_file that. This is how a screenshot becomes "

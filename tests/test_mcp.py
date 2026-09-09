@@ -19,9 +19,14 @@ legacy-era stdio server (the installed base), plus the A2A discovery card.
 Run from the agent/ directory:  python tests/test_mcp.py
 """
 
+import base64
+import builtins
 import json
 import os
+import re
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -36,6 +41,441 @@ import toolbox
 
 PY = sys.executable
 MOCK = os.path.join(AGENT_DIR, "tests", "mock_mcp_server.py")
+
+
+def _literal_png():
+    return bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44"
+        "ae426082")
+
+
+def _redirect_directory(link, target):
+    """Create a real directory redirect using the platform's available kind."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return "symlink"
+    except OSError:
+        if os.name != "nt":
+            raise
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", link, target],
+                          capture_output=True, text=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    return "junction"
+
+
+def image_directory_redirection():
+    raw = _literal_png()
+    encoded = base64.b64encode(raw).decode("ascii")
+    kinds = []
+    for redirect in ("tmp", "mcp-artifacts"):
+        root = tempfile.mkdtemp(prefix=f"mcp-redirect-{redirect}-")
+        outside = tempfile.mkdtemp(prefix=f"mcp-outside-{redirect}-")
+        if redirect == "tmp":
+            link = os.path.join(root, "tmp")
+            escaped = os.path.join(outside, "mcp-artifacts")
+        else:
+            os.mkdir(os.path.join(root, "tmp"))
+            link = os.path.join(root, "tmp", "mcp-artifacts")
+            escaped = outside
+        kinds.append(_redirect_directory(link, outside))
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": encoded}]}, root)
+        assert "content omitted" in rendered and "saved to" not in rendered, \
+            f"redirected {redirect} directory was accepted"
+        assert not os.path.exists(os.path.join(
+            escaped,
+            "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png"
+        )), f"redirected {redirect} directory published outside the expert root"
+    print(f"[mcp-containment] redirected tmp/artifact directories refused "
+          f"through real {'/'.join(kinds)} filesystem entries")
+
+
+def image_existing_target_link():
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-target-link-")
+    outside = tempfile.mkdtemp(prefix="mcp-target-outside-")
+    artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
+    os.makedirs(artifact_dir)
+    outside_file = os.path.join(outside, "shared.png")
+    with open(outside_file, "wb") as f:
+        f.write(raw)
+    target = os.path.join(
+        artifact_dir,
+        "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png")
+    try:
+        os.symlink(outside_file, target)
+        link_kind = "symlink"
+    except OSError:
+        # Windows normally requires a privilege for symbolic links. A hard
+        # link is still mutable through an outside name and must not qualify
+        # as an immutable expert-local artifact.
+        os.link(outside_file, target)
+        link_kind = "hard-link"
+    rendered = mcp.render_result(
+        {"content": [{"type": "image", "mimeType": "image/png",
+                      "data": base64.b64encode(raw).decode("ascii")}]}, root)
+    assert "content omitted" in rendered and "saved to" not in rendered, \
+        f"existing digest {link_kind} was accepted as immutable evidence"
+    with open(outside_file, "rb") as f:
+        assert f.read() == raw
+    if os.name == "nt":
+        junction_root = tempfile.mkdtemp(prefix="mcp-target-junction-")
+        junction_outside = tempfile.mkdtemp(prefix="mcp-target-junction-outside-")
+        junction_dir = os.path.join(junction_root, "tmp", "mcp-artifacts")
+        os.makedirs(junction_dir)
+        junction_target = os.path.join(
+            junction_dir,
+            "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png")
+        _redirect_directory(junction_target, junction_outside)
+        junction_rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(raw).decode("ascii")}]},
+            junction_root)
+        assert "content omitted" in junction_rendered \
+            and "saved to" not in junction_rendered, \
+            "existing digest junction was accepted as a regular artifact"
+        link_kind += "/junction"
+    print(f"[mcp-containment] existing digest {link_kind} refused without "
+          f"changing its outside target")
+
+
+def image_directory_swap_race():
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-dir-swap-")
+    outside = tempfile.mkdtemp(prefix="mcp-dir-swap-outside-")
+    artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
+    parked = os.path.join(root, "parked-artifacts")
+    os.makedirs(artifact_dir)
+    real_mkstemp = tempfile.mkstemp
+    redirected = []
+
+    def swapping_mkstemp(*args, **kwargs):
+        os.rename(artifact_dir, parked)
+        redirected.append(_redirect_directory(artifact_dir, outside))
+        return real_mkstemp(*args, **kwargs)
+
+    tempfile.mkstemp = swapping_mkstemp
+    try:
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(raw).decode("ascii")}]}, root)
+    finally:
+        tempfile.mkstemp = real_mkstemp
+    assert redirected, "test did not swap the directory at the creation boundary"
+    assert "content omitted" in rendered and "saved to" not in rendered, \
+        "directory swapped before unique-temp creation was accepted"
+    assert os.listdir(outside) == [], \
+        "a directory swap left an artifact or temporary file outside the root"
+    print(f"[mcp-race] {redirected[0]} swap before unique-temp creation "
+          f"fails closed and cleans the outside temporary file")
+
+
+def image_publication_swap_race():
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-publish-swap-")
+    outside = tempfile.mkdtemp(prefix="mcp-publish-swap-outside-")
+    artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
+    parked = os.path.join(root, "parked-artifacts")
+    os.makedirs(artifact_dir)
+    real_link = os.link
+    attempted = []
+
+    def swapping_link(source, target, *args, **kwargs):
+        attempted.append(True)
+        os.rename(artifact_dir, parked)
+        _redirect_directory(artifact_dir, outside)
+        outside_source = os.path.join(outside, os.path.basename(source))
+        with open(outside_source, "wb") as f:
+            f.write(raw)
+        return real_link(source, target, *args, **kwargs)
+
+    os.link = swapping_link
+    try:
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(raw).decode("ascii")}]}, root)
+    finally:
+        os.link = real_link
+    assert attempted, "test did not reach the atomic publication boundary"
+    assert "content omitted" in rendered and "saved to" not in rendered
+    escaped = os.path.join(
+        outside,
+        "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png")
+    assert not os.path.exists(escaped), \
+        "a last-moment directory swap published outside the expert root"
+    print("[mcp-race] directory replacement at atomic publication is blocked "
+          "or fails closed without an outside artifact")
+
+
+def image_posix_directory_fd_anchor():
+    if os.name == "nt":
+        print("[mcp-posix-anchor] NOT-APPLICABLE on Windows: publication uses "
+              "identity revalidation and alias cleanup instead")
+        return
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-posix-anchor-")
+    artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
+    real_link = os.link
+    observed = []
+
+    def observing_link(source, target, *args, **kwargs):
+        src_fd = kwargs.get("src_dir_fd")
+        dst_fd = kwargs.get("dst_dir_fd")
+        assert isinstance(src_fd, int) and src_fd == dst_fd, \
+            "POSIX publication was not anchored to one directory descriptor"
+        opened = os.fstat(src_fd)
+        expected = os.lstat(artifact_dir)
+        observed.append((opened.st_dev, opened.st_ino))
+        assert observed[-1] == (expected.st_dev, expected.st_ino), \
+            "publication descriptor did not identify the validated directory"
+        return real_link(source, target, *args, **kwargs)
+
+    os.link = observing_link
+    try:
+        saved = mcp._save_blob(
+            root, {"type": "image", "mimeType": "image/png",
+                   "data": base64.b64encode(raw).decode("ascii")}, 0)
+    finally:
+        os.link = real_link
+    assert observed and saved is not None, \
+        "valid POSIX publication did not traverse the directory-fd anchor"
+    print("[mcp-posix-anchor] publication source and target names are both "
+          "resolved relative to the validated open directory descriptor")
+
+
+def _short_name(path):
+    if os.name != "nt":
+        return None
+    import ctypes
+    buffer = ctypes.create_unicode_buffer(1024)
+    if not ctypes.windll.kernel32.GetShortPathNameW(path, buffer, 1024):
+        return None
+    short = buffer.value
+    return short if os.path.normcase(os.path.abspath(short)) != \
+        os.path.normcase(os.path.abspath(path)) else None
+
+
+def _same_physical_path(left, right):
+    return (os.path.normcase(os.path.realpath(left)) ==
+            os.path.normcase(os.path.realpath(right)))
+
+
+def _image_existing_target_swap_race(root, spelling):
+    raw = _literal_png()
+    outside = tempfile.mkdtemp(prefix="mcp-target-swap-outside-")
+    artifact_dir = os.path.join(root, "tmp", "mcp-artifacts")
+    os.makedirs(artifact_dir)
+    target = os.path.join(
+        artifact_dir,
+        "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png")
+    outside_file = os.path.join(outside, "replacement.png")
+    for path in (target, outside_file):
+        with open(path, "wb") as f:
+            f.write(raw)
+    real_open = builtins.open
+    swapped = []
+
+    def swapping_open(path, mode="r", *args, **kwargs):
+        if not swapped and mode == "rb" and _same_physical_path(path, target):
+            os.unlink(target)
+            os.link(outside_file, target)
+            swapped.append(True)
+        return real_open(path, mode, *args, **kwargs)
+
+    builtins.open = swapping_open
+    try:
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(raw).decode("ascii")}]}, root)
+    finally:
+        builtins.open = real_open
+    assert swapped, "test did not swap the target at the read boundary"
+    assert "content omitted" in rendered and "saved to" not in rendered, \
+        "digest target swapped to an outside hard link was accepted"
+    assert os.stat(outside_file).st_nlink == 2
+    print(f"[mcp-race] {spelling} existing regular target swapped to an "
+          f"outside hard link during read fails closed")
+
+
+def image_existing_target_swap_race():
+    _image_existing_target_swap_race(
+        tempfile.mkdtemp(prefix="mcp-target-swap-"), "normal-path")
+    if os.name == "nt":
+        parent = tempfile.mkdtemp(prefix="mcp-target-swap-alias-")
+        long_root = os.path.join(parent, "mcpaliasspellingprobe")
+        os.mkdir(long_root)
+        alias = _short_name(long_root)
+        if alias is None:
+            print("[mcp-race] SKIP actual-8.3-path: 8dot3 name creation is disabled")
+        else:
+            assert os.path.realpath(alias) != os.path.abspath(alias), \
+                "8.3 fixture did not produce a real spelling difference"
+            _image_existing_target_swap_race(alias, "actual-8.3-path")
+
+
+def image_existing_parent_redirect_at_open():
+    """Move tmp out and junction it back while the existing target opens."""
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-parent-move-")
+    outside = tempfile.mkdtemp(prefix="mcp-parent-move-outside-")
+    tmp_dir = os.path.join(root, "tmp")
+    artifact_dir = os.path.join(tmp_dir, "mcp-artifacts")
+    moved_tmp = os.path.join(outside, "moved-tmp")
+    os.makedirs(artifact_dir)
+    target = os.path.join(
+        artifact_dir,
+        "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png")
+    with open(target, "wb") as f:
+        f.write(raw)
+    real_open = builtins.open
+    moved = []
+
+    def moving_open(path, mode="r", *args, **kwargs):
+        if not moved and mode == "rb" and _same_physical_path(path, target):
+            os.rename(tmp_dir, moved_tmp)
+            moved.append(_redirect_directory(tmp_dir, moved_tmp))
+        return real_open(path, mode, *args, **kwargs)
+
+    builtins.open = moving_open
+    try:
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(raw).decode("ascii")}]}, root)
+    finally:
+        builtins.open = real_open
+    assert moved, "test did not move and redirect the parent during target open"
+    assert "content omitted" in rendered and "saved to" not in rendered, \
+        "same-inode target outside a redirected parent was returned as local"
+    moved_target = os.path.join(moved_tmp, "mcp-artifacts", os.path.basename(target))
+    with open(moved_target, "rb") as f:
+        assert f.read() == raw
+    print(f"[mcp-return-gate] parent move/{moved[0]} during existing target "
+          f"open is refused after byte verification")
+
+
+def wav_artifact():
+    wav = bytes.fromhex(
+        "524946462400000057415645666d74201000000001000100401f0000401f0000"
+        "010008006461746100000000")
+    wav_sha = "5b517b506f635e251ee0d7020062f1ce375cc3a92f1f445e71be6995f4a591f1"
+    wav_expected = {
+        "path": f"tmp/mcp-artifacts/{wav_sha}.wav", "sha256": wav_sha,
+        "bytes": 44, "mime": "audio/wav", "width": None, "height": None,
+    }
+    wav_root = tempfile.mkdtemp(prefix="mcp-wav-")
+    wav_saved = mcp._save_blob(
+        wav_root,
+        {"type": "audio", "mimeType": "audio/wav",
+         "data": base64.b64encode(wav).decode("ascii")}, 0)
+    assert wav_saved == wav_expected, "valid WAV evidence was discarded"
+    with open(os.path.join(wav_root, *wav_expected["path"].split("/")), "rb") as f:
+        assert f.read() == wav
+    print("[mcp-binary] literal WAV retains canonical .wav/audio metadata")
+
+
+def generic_binary_artifact():
+    generic = bytes.fromhex("000102626c6f62ff")
+    generic_sha = "626a57d7c9a3afc67e22c1d5f461d462282bb06211bb4a0275d22030f080617c"
+    generic_expected = {
+        "path": f"tmp/mcp-artifacts/{generic_sha}.bin", "sha256": generic_sha,
+        "bytes": 8, "mime": "application/octet-stream",
+        "width": None, "height": None,
+    }
+    generic_root = tempfile.mkdtemp(prefix="mcp-generic-")
+    generic_saved = mcp._save_blob(
+        generic_root,
+        {"type": "blob", "mimeType": "application/x-msdownload",
+         "data": base64.b64encode(generic).decode("ascii")}, 0)
+    assert generic_saved == generic_expected, \
+        "generic bytes trusted an executable-like declaration or were discarded"
+    with open(os.path.join(
+            generic_root, *generic_expected["path"].split("/")), "rb") as f:
+        assert f.read() == generic
+    print("[mcp-binary] generic bytes use safe .bin/octet-stream with null dimensions")
+
+
+def image_structured_artifacts():
+    raw = _literal_png()
+    root = tempfile.mkdtemp(prefix="mcp-structured-")
+    artifacts = []
+    try:
+        rendered = mcp.render_result(
+            {"content": [
+                {"type": "text", "text": "x" * (mcp.MAX_RESULT_CHARS + 100)},
+                {"type": "image", "mimeType": "image/png",
+                 "data": base64.b64encode(raw).decode("ascii")},
+            ]}, root, artifacts=artifacts)
+    except TypeError as e:
+        raise AssertionError(
+            "render_result lacks a structured artifact evidence API") from e
+    expected = {
+        "path": "tmp/mcp-artifacts/"
+                "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png",
+        "sha256": "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5",
+        "bytes": 70, "mime": "image/png", "width": 1, "height": 1,
+    }
+    assert expected["path"] not in rendered, \
+        "fixture must put the flattened artifact text beyond truncation"
+    assert artifacts == [expected], \
+        "structured artifact evidence was lost with flattened display truncation"
+    with open(os.path.join(root, *expected["path"].split("/")), "rb") as f:
+        assert f.read() == raw
+    print("[mcp-structured] long display text truncates, but exact structured "
+          "path/hash/bytes/mime/dimensions remain available")
+
+
+def image_signature_type():
+    raw = _literal_png()
+    expected = {
+        "path": "tmp/mcp-artifacts/"
+                "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5.png",
+        "sha256": "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5",
+        "bytes": 70, "mime": "image/png", "width": 1, "height": 1,
+    }
+    unlabelled_root = tempfile.mkdtemp(prefix="mcp-signature-")
+    saved = mcp._save_blob(
+        unlabelled_root,
+        {"type": "image", "data": base64.b64encode(raw).decode("ascii")}, 0)
+    assert saved == expected, "PNG type and extension were not derived from bytes"
+    print("[mcp-signature] unlabelled PNG derives .png/type/dimensions from bytes")
+
+
+def image_mime_conflict():
+    raw = _literal_png()
+    conflict_root = tempfile.mkdtemp(prefix="mcp-mime-conflict-")
+    conflict = mcp._save_blob(
+        conflict_root,
+        {"type": "image", "mimeType": "image/jpeg",
+         "data": base64.b64encode(raw).decode("ascii")}, 0)
+    assert conflict is None, "PNG bytes mislabeled JPEG claimed the wrong MIME/extension"
+    assert not os.path.exists(os.path.join(conflict_root, "tmp")), \
+        "a declaration conflict created an artifact before refusal"
+    print("[mcp-signature] PNG bytes declared as JPEG are refused before storage")
+
+
+def image_encoded_limit_precheck():
+    root = tempfile.mkdtemp(prefix="mcp-encoded-limit-")
+    oversized = "A" * 33_333_336  # valid shape, decodes to 25,000,002 bytes
+    original_decode = base64.b64decode
+    called = []
+
+    def observed_decode(*args, **kwargs):
+        called.append(True)
+        return b"x"
+
+    base64.b64decode = observed_decode
+    try:
+        saved = mcp._save_blob(
+            root, {"type": "image", "mimeType": "image/png",
+                   "data": oversized}, 0)
+    finally:
+        base64.b64decode = original_decode
+    assert not called, "oversized encoded input reached the allocating decoder"
+    assert saved is None and not os.path.exists(os.path.join(root, "tmp"))
+    print("[mcp-size] encoded-length precheck refuses a >25 MB decoded payload "
+          "before base64 allocation")
 
 
 def main():
@@ -178,33 +618,120 @@ def main():
     # screenshot reached the model as that literal string, so every visual
     # question was unanswerable — and the agent could not even tell that
     # something had been withheld from it.
-    import base64 as _b64
-    import tempfile as _tmp
-    _root = _tmp.mkdtemp(prefix="mcp-img-")
-    PNG = _b64.b64encode(bytes.fromhex(
+    _root = tempfile.mkdtemp(prefix="mcp-img-")
+    png_red = bytes.fromhex(
         "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-        "0000000a49444154789c6360000002000100ffff0300000600055773d5c0000000"
-        "0049454e44ae426082")).decode()
-    out = mcp.render_result(
-        {"content": [{"type": "text", "text": "navigated to https://example.org"},
-                     {"type": "image", "mimeType": "image/png", "data": PNG}]},
-        _root)
-    saved = [n for n in os.listdir(os.path.join(_root, "tmp"))
-             if n.endswith(".png")]
-    assert saved, "the image block was discarded instead of written to disk"
-    assert "tmp/" in out and "ingest.py vision" in out, (
-        f"the result must name the path AND the command that reads it, or a "
-        f"file on disk nobody knows how to open is the same as no file: {out[:200]}")
-    assert "navigated to https://example.org" in out, "the text block was lost"
-    # and something undecodable says so rather than pretending
-    bad = mcp.render_result(
+        "0000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44"
+        "ae426082")
+    png_green = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000002000000030806000000b9eade81"
+        "0000000e49444154789c6360f80f85180c009b7f0bf52814b0040000000049454e"
+        "44ae426082")
+    png_red_sha = "4ff6ab670a58c14270e034e2090d9a432caa263a14e0a25785386b0c12f880b5"
+    png_green_sha = "903dd2970e2f252c87178783090ab936f2727bc63d7690035444bf9f1a90b729"
+    png_red_rel = f"tmp/mcp-artifacts/{png_red_sha}.png"
+    png_green_rel = f"tmp/mcp-artifacts/{png_green_sha}.png"
+
+    real_time = mcp.time.time
+    mcp.time.time = lambda: 1234567890
+    try:
+        red_out = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(png_red).decode("ascii")}]},
+            _root)
+        green_out = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": base64.b64encode(png_green).decode("ascii")}]},
+            _root)
+    finally:
+        mcp.time.time = real_time
+
+    red_saved = re.search(r"saved to ([^ ]+)", red_out).group(1)
+    green_saved = re.search(r"saved to ([^ ]+)", green_out).group(1)
+    assert red_saved != green_saved, (
+        "different same-index image bytes rendered in one second reused one path; "
+        "the second image overwrote the first")
+    assert red_saved == png_red_rel and green_saved == png_green_rel
+    red_path = os.path.join(_root, *png_red_rel.split("/"))
+    green_path = os.path.join(_root, *png_green_rel.split("/"))
+    with open(red_path, "rb") as f:
+        assert f.read() == png_red, "the first immutable artifact bytes changed"
+    with open(green_path, "rb") as f:
+        assert f.read() == png_green, "the second immutable artifact bytes changed"
+    assert (f'{{"path":"{png_red_rel}","sha256":"{png_red_sha}",'
+            f'"bytes":70,"mime":"image/png","width":1,"height":1}}') in red_out
+    assert (f'{{"path":"{png_green_rel}","sha256":"{png_green_sha}",'
+            f'"bytes":71,"mime":"image/png","width":2,"height":3}}') in green_out
+
+    # The same bytes resolve to the same path and do not rewrite that inode.
+    os.utime(red_path, ns=(1500000000000000000, 1500000000000000000))
+    before = os.stat(red_path)
+    duplicate_out = mcp.render_result(
         {"content": [{"type": "image", "mimeType": "image/png",
-                      "data": "!!!not base64!!!"}]}, _root)
-    assert "omitted" in bad and "gone rather than hidden" in bad, bad
-    print(f"[sees] an image block is written to tmp/ ({saved[0]}) and the "
-          f"result names the exact `ingest.py vision` command that reads it, "
-          f"so a screenshot becomes something the agent can answer questions "
-          f"about; an undecodable blob is reported as gone, not hidden")
+                      "data": base64.b64encode(png_red).decode("ascii")}]}, _root)
+    after = os.stat(red_path)
+    assert png_red_rel in duplicate_out
+    assert after.st_ino == before.st_ino and after.st_mtime_ns == before.st_mtime_ns, \
+        "deduplication rewrote an existing digest path"
+    with open(red_path, "rb") as f:
+        assert f.read() == png_red
+
+    # Dimension metadata is parsed from bounded PNG, JPEG and WebP headers.
+    # GIF has a safe extension but deliberately remains unknown rather than guessed.
+    formats = [
+        ("image/jpeg", ".jpg",
+         bytes.fromhex("ffd8ffe000104a46494600010100000100010000ffc000110800030002"
+                       "03011100021100031100ffd9"),
+         "f72fcc9b3aabce2fe66ba030abdb774264fcc41afffaac5c9521b7fbcbb7ef95",
+         41, 2, 3),
+        ("image/webp", ".webp",
+         bytes.fromhex("524946461600000057454250565038580a00000000000000060000040000"),
+         "d747fbe6df40aa39845f7f9f406c0e45a4fdcfa821643f6d5c9c584ec9dec47c",
+         30, 7, 5),
+        ("image/gif", ".gif", bytes.fromhex("47494638396109000400"),
+         "e08e8eef7834c49f2c83f1aad3c102a41e01f4d5459b2c967f23de681f678e3e",
+         10, None, None),
+    ]
+    for mime, ext, raw, literal_sha, literal_size, width, height in formats:
+        rel = f"tmp/mcp-artifacts/{literal_sha}{ext}"
+        rendered = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": mime,
+                          "data": base64.b64encode(raw).decode("ascii")}]}, _root)
+        width_json = "null" if width is None else str(width)
+        height_json = "null" if height is None else str(height)
+        literal_metadata = (f'{{"path":"{rel}","sha256":"{literal_sha}",'
+                            f'"bytes":{literal_size},"mime":"{mime}",'
+                            f'"width":{width_json},"height":{height_json}}}')
+        assert literal_metadata in rendered, rendered
+        with open(os.path.join(_root, *rel.split("/")), "rb") as f:
+            assert f.read() == raw
+
+    # Malformed and oversized untrusted payloads are refused without artifacts.
+    names_before = set(os.listdir(os.path.join(_root, "tmp", "mcp-artifacts")))
+    for data in ("!!!not base64!!!", "A" * 33_333_336):
+        refused = mcp.render_result(
+            {"content": [{"type": "image", "mimeType": "image/png",
+                          "data": data}]}, _root)
+        assert "omitted" in refused and "gone rather than hidden" in refused
+    assert set(os.listdir(os.path.join(_root, "tmp", "mcp-artifacts"))) == names_before
+    assert not [name for name in names_before if name.endswith(".tmp")]
+    print("[mcp-image] different same-index images retain literal bytes at distinct "
+          "SHA-256 paths; duplicates do not rewrite; PNG/JPEG/WebP dimensions are "
+          "parsed, GIF stays null, and malformed/oversized payloads are refused")
+
+    image_directory_redirection()
+    image_existing_target_link()
+    image_directory_swap_race()
+    image_publication_swap_race()
+    image_posix_directory_fd_anchor()
+    image_existing_target_swap_race()
+    image_existing_parent_redirect_at_open()
+    wav_artifact()
+    generic_binary_artifact()
+    image_structured_artifacts()
+    image_signature_type()
+    image_mime_conflict()
+    image_encoded_limit_precheck()
 
     print("PASS test_mcp")
 

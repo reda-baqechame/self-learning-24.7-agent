@@ -272,6 +272,62 @@ def _real(path):
         probe = parent
 
 
+def _logical_path(rel):
+    """Return one unambiguous root-relative spelling for zone decisions.
+
+    Physical canonicalisation answers where a path lands; it cannot answer
+    which logical zone the caller requested.  Dot segments are therefore
+    refused instead of normalised after a trusted-looking prefix has already
+    influenced authority.  Windows names with alternate streams or trailing
+    dot/space aliases are likewise outside this path contract.
+    """
+    raw = str(rel).replace("\\", "/")
+    if os.path.isabs(raw) or raw.startswith("//") \
+            or (len(raw) > 1 and raw[1] == ":"):
+        raise Denied(f"absolute paths are not accepted here: {rel}")
+    if any(ord(character) < 32 or ord(character) == 127
+           for character in raw):
+        raise Denied(f"path contains control characters: {rel!r}")
+    parts = [part for part in raw.split("/") if part]
+    if any(part in (".", "..") for part in parts):
+        raise Denied(f"path escapes or contains ambiguous dot segments: {rel}")
+    if os.name == "nt":
+        reserved = {"CON", "PRN", "AUX", "NUL"} | \
+            {f"COM{number}" for number in range(1, 10)} | \
+            {f"LPT{number}" for number in range(1, 10)}
+        for part in parts:
+            stem = part.split(".", 1)[0].upper()
+            if ":" in part or part.endswith((".", " ")) or stem in reserved:
+                raise Denied(f"ambiguous Windows path is not accepted here: {rel}")
+    return "/".join(parts)
+
+
+def _physical_relative(root_real, full):
+    """Return `(relative, actual_root)` using filesystem object identity.
+
+    Windows 8.3/long-name spellings can name the same directory without
+    sharing a string prefix.  Walking existing ancestors and comparing them
+    with `samefile` both proves containment and recovers the physical spelling
+    needed for zone and credential checks.  Errors fail closed.
+    """
+    root_abs = os.path.abspath(root_real)
+    full_abs = os.path.abspath(full)
+    cursor = full_abs
+    tail = []
+    while True:
+        if os.path.exists(cursor):
+            try:
+                if os.path.samefile(cursor, root_abs):
+                    return "/".join(reversed(tail)), cursor
+            except OSError:
+                raise Denied("filesystem identity could not be established")
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            raise Denied("path escapes the expert root")
+        tail.append(os.path.basename(cursor))
+        cursor = parent
+
+
 def resolve(root, rel, mode="read", actor="agent", allow_zones=None):
     """-> an absolute path inside `root`, or raise Denied.
 
@@ -281,34 +337,37 @@ def resolve(root, rel, mode="read", actor="agent", allow_zones=None):
                         reach runtime/control state it owns
     """
     root_real = os.path.realpath(root)
-    raw = str(rel).replace("\\", "/")
-    if os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":"):
-        raise Denied(f"absolute paths are not accepted here: {rel}")
-    full = _real(os.path.join(root_real, raw))
-    if full != root_real and not full.startswith(root_real + os.sep):
-        raise Denied(f"path escapes the expert root: {rel}")
+    logical = _logical_path(rel)
+    full = _real(os.path.join(root_real, *logical.split("/")))
+    try:
+        physical_logical, physical_root = _physical_relative(root_real, full)
+    except Denied as error:
+        raise Denied(f"path escapes the expert root: {rel}") from error
 
     import credentials
-    if credentials.is_secret(full, root_real):
+    if credentials.is_secret(full, physical_root):
         # wording kept verbatim: the tool contract "ERROR: ... secrets file"
         # is asserted by the guardrail tests and read by the model
         raise Denied(f"refusing access to a secrets file: {rel}")
 
-    z = zone_of(raw)
-    if allow_zones is not None and z not in allow_zones:
-        raise Denied(f"{rel} is {z} state; this operation may only touch "
+    z = zone_of(logical)
+    physical_zone = zone_of(physical_logical)
+    if allow_zones is not None and (z not in allow_zones
+                                    or physical_zone not in allow_zones):
+        raise Denied(f"{rel} is {z}/{physical_zone} logical/physical state; "
+                     f"this operation may only touch "
                      f"{', '.join(sorted(allow_zones))}")
     if actor == "agent" and mode == "write":
-        if z == ZONE_CONTROL:
+        if ZONE_CONTROL in (z, physical_zone):
             raise Denied(
                 f"refusing to write {rel}: control state defines what this "
                 f"agent is allowed to do, so the agent does not get to edit "
                 f"it. Use the tool that governs it — variants.py for "
                 f"charters, approvals.py for decisions, the panel for "
                 f"settings.")
-        if z == ZONE_RUNTIME:
+        if ZONE_RUNTIME in (z, physical_zone):
             raise Denied(
-                f"refusing to write {rel}: {raw.split('/')[0]}/ is the "
+                f"refusing to write {rel}: {logical.split('/')[0]}/ is the "
                 f"harness's own record of what happened. Rewriting it would "
                 f"make the trace worthless as evidence.")
     return full
@@ -320,7 +379,7 @@ def read_text(root, rel, actor="agent", limit=None, encoding="utf-8"):
         return f.read() if limit is None else f.read(limit)
 
 
-def write_text(root, rel, text, actor="agent", encoding="utf-8"):
+def write_text(root, rel, text, actor="agent", encoding="utf-8", durable=False):
     """Contained, then ATOMIC: write a unique temp beside the target and
     replace. A crash mid-write leaves the previous file whole rather than a
     truncated one, and two writers cannot share a scratch name."""
@@ -332,6 +391,9 @@ def write_text(root, rel, text, actor="agent", encoding="utf-8"):
     tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp, "w", encoding=encoding) as f:
         f.write(text)
+        if durable:
+            f.flush()
+            os.fsync(f.fileno())
     for attempt in range(8):
         try:
             os.replace(tmp, p)
@@ -392,10 +454,10 @@ def write_bytes(root, rel, data, actor="agent"):
     return p
 
 
-def write_json(root, rel, obj, actor="agent", indent=1):
+def write_json(root, rel, obj, actor="agent", indent=1, durable=False):
     return write_text(root, rel,
                       json.dumps(obj, indent=indent, ensure_ascii=False) + "\n",
-                      actor=actor)
+                      actor=actor,durable=durable)
 
 
 def describe():

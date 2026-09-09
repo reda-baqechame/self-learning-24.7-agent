@@ -167,11 +167,11 @@ def check_the_shell_cannot_move_the_control_plane():
     agent_setting(sb, f"max_steps = {len(script) + 5}")
     agent_setting(sb, "max_task_retries = 0")
     # The matrix is DERIVED from fileauth's zone tables, so it grows with
-    # them: 31 control paths make 103 shell steps in ONE task, and every
+    # them: every control path adds shell processes to ONE task, and every
     # step's result carries the sandbox path. On a CI runner whose checkout
-    # path is long (D:\a\<repo>\<repo>\...) the conversation crossed the
+    # path is long (D:\a\<repo>\<repo>\...) the conversation once crossed the
     # scripted provider's default 131072-byte context bound at the last
-    # step — the budget guard did its job and the 103rd command never ran.
+    # step — the budget guard did its job and the final command never ran.
     # The mock has no real window; declare a larger one for this fixture
     # so the containment matrix, not the context budget, is what is tested.
     agent_setting(sb, "context_limit = 262144")
@@ -182,7 +182,10 @@ def check_the_shell_cannot_move_the_control_plane():
 
     before = digests(sb, rels)
     a.add_task("practitioner", "attempt to edit the control plane")
-    assert run_drain(sb) == 0
+    # This is only the outer test-process deadline, not an agent step, retry,
+    # or authority budget.  Scale it with the derived command matrix while
+    # keeping a finite bound on a hung fixture and the shared default intact.
+    assert run_drain(sb, timeout=max(60, len(script))) == 0
     after = digests(sb, rels)
 
     moved = [r for r in rels if before[r] != after[r]]
