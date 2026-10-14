@@ -23,12 +23,16 @@ tree before its fix and passes after:
 Run from the agent/ directory:  python tests/test_correctness_patch.py
 """
 import hashlib
+import errno
 import io
 import json
 import os
 import sqlite3
+import stat
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 from common import AGENT_DIR
 
@@ -288,12 +292,101 @@ def check_registration():
           "closed set")
 
 
+def check_windows_atomic_paths():
+    if os.name != "nt":
+        print("[windows-atomic-path] native Windows path witness not run on this platform")
+        return
+    with tempfile.TemporaryDirectory(prefix="atomic-path-") as root:
+        base = os.path.join(root, "artifacts")
+        directory = os.path.join(base, "x" * (232 - len(base) - 1))
+        os.makedirs(directory)
+        binary = os.path.relpath(os.path.join(directory, "result.bin"), root)
+        text = os.path.relpath(os.path.join(directory, "result.txt"), root)
+        assert len(os.path.join(root, binary)) == 243
+        # The final destination is valid on this host; atomic staging may not
+        # make a valid write fail by extending that filename beyond MAX_PATH.
+        with open(os.path.join(root, binary), "wb") as stream:
+            stream.write(b"previous complete artifact")
+        fileauth.write_bytes(root, binary, b"new complete artifact")
+        assert fileauth.read_bytes(root, binary) == b"new complete artifact"
+        fileauth.write_text(root, text, "Verified résumé", durable=True)
+        assert fileauth.read_text(root, text) == "Verified résumé"
+        fileauth.write_text(root, text, "Default text encoding remains text", encoding=None)
+        assert fileauth.read_text(root, text) == "Default text encoding remains text"
+        try:
+            fileauth.write_text(root, text, "must not replace valid text", encoding="not-a-real-codec")
+        except LookupError:
+            pass
+        else:
+            raise AssertionError("invalid text encoding did not retain its original error")
+        assert fileauth.read_text(root, text) == "Default text encoding remains text"
+        payloads = [bytes([index]) * 4096 for index in range(8)]
+        with ThreadPoolExecutor(max_workers=8) as writers:
+            list(writers.map(lambda data: fileauth.write_bytes(root, binary, data), payloads))
+        previous = fileauth.read_bytes(root, binary)
+        assert previous in payloads, "concurrent atomic writes published a partial/mixed payload"
+        with patch("fileauth.os.replace", side_effect=OSError(5, "test-owned replace failure")):
+            try:
+                fileauth.write_bytes(root, binary, b"must not be published")
+            except OSError:
+                pass
+            else:
+                raise AssertionError("failed atomic replacement was reported as successful")
+        assert fileauth.read_bytes(root, binary) == previous
+        assert set(os.listdir(directory)) == {"result.bin", "result.txt"}, "uncommitted staging file was retained"
+    print("[windows-atomic-path] valid 243-character text/binary destinations, durable text, concurrent whole writes and failed-replace cleanup passed")
+
+
+def check_atomic_permissions():
+    if os.name != "posix":
+        print("[posix-atomic-permissions] POSIX umask witness not run on this platform")
+        return
+    with tempfile.TemporaryDirectory(prefix="atomic-mode-") as root:
+        for mask, expected in [(0o022, 0o644), (0o077, 0o600)]:
+            previous_mask = os.umask(mask)
+            try:
+                binary = f"artifacts/mode-{mask}.bin"
+                text = f"artifacts/mode-{mask}.txt"
+                fileauth.write_bytes(root, binary, b"owned permission fixture")
+                fileauth.write_text(root, text, "owned permission fixture")
+                assert stat.S_IMODE(os.stat(os.path.join(root, binary)).st_mode) == expected
+                assert stat.S_IMODE(os.stat(os.path.join(root, text)).st_mode) == expected
+            finally:
+                os.umask(previous_mask)
+    print("[posix-atomic-permissions] text/binary outputs retain ordinary creation permissions under public/private umasks")
+
+
+def check_atomic_collision():
+    with tempfile.TemporaryDirectory(prefix="atomic-collision-") as root:
+        original_open = os.open
+        occupied = []
+        def collide_once(path, flags, *args, **kwargs):
+            if flags & os.O_EXCL and not occupied:
+                descriptor = original_open(path, flags, *args, **kwargs)
+                try:
+                    os.write(descriptor, b"another writer owns these bytes")
+                finally:
+                    os.close(descriptor)
+                occupied.append(path)
+                raise FileExistsError(errno.EEXIST, "test-owned staging collision", path)
+            return original_open(path, flags, *args, **kwargs)
+        with patch("fileauth.os.open", side_effect=collide_once):
+            fileauth.write_bytes(root, "artifacts/result.bin", b"our complete artifact")
+        assert fileauth.read_bytes(root, "artifacts/result.bin") == b"our complete artifact"
+        assert occupied and open(occupied[0], "rb").read() == b"another writer owns these bytes"
+        assert set(os.listdir(os.path.join(root, "artifacts"))) == {"result.bin", os.path.basename(occupied[0])}
+    print("[atomic-collision] exclusive-name collision retries without replacing or deleting another writer's staging")
+
+
 def main():
     check_structured_verdict(_arena("verdict"))
     check_missing_database_creates_nothing(_arena("missingdb"))
     check_invariant_ordering(_arena("invariants"))
     check_streaming_hash(_arena("hash"))
     check_registration()
+    check_windows_atomic_paths()
+    check_atomic_permissions()
+    check_atomic_collision()
     print("PASS test_correctness_patch")
 
 

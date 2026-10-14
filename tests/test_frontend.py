@@ -173,16 +173,21 @@ def main():
         assert json.loads(get("/api/experts/fresh-one/tasks")[1]) == []
         print("[fresh] a newly created expert answers on all six read endpoints, no 500s")
 
-        # editing ui.html is picked up without restarting the server
-        with open(page, "r", encoding="utf-8") as f:
+        # Editing ui.html is picked up without restarting the server.
+        # newline="" on BOTH writes, because this is a tracked file: in text
+        # mode the restore turned every \n into \r\n on Windows and left
+        # `git status` dirty after every suite run, with an empty diff to
+        # explain it. A test may borrow a shipped file; it may not hand it
+        # back with different bytes.
+        with open(page, "r", encoding="utf-8", newline="") as f:
             original = f.read()
         try:
-            with open(page, "w", encoding="utf-8") as f:
+            with open(page, "w", encoding="utf-8", newline="") as f:
                 f.write(original.replace("<title>Expert Fleet</title>",
                                          "<title>Edited Live</title>"))
             assert "Edited Live" in get("/")[1], "page edits must not need a restart"
         finally:
-            with open(page, "w", encoding="utf-8") as f:
+            with open(page, "w", encoding="utf-8", newline="") as f:
                 f.write(original)
         assert "Expert Fleet" in get("/")[1]
         print("[live] frontend edits appear on reload with no server restart")

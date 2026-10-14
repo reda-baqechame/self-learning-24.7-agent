@@ -236,6 +236,29 @@ def concurrent_updates(sb):
     print("[transaction] concurrent public add + set_role preserve both edits and all original settings")
 
 
+def _norm(p):
+    return os.path.normcase(os.path.abspath(p))
+
+
+def _same_dir(a, b):
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return _norm(a) == _norm(b)
+
+
+def _same_file(a, b):
+    """Two spellings of one destination. The file may not exist yet (a failed
+    replacement is exactly the case under test), so identity falls back to a
+    normalised comparison rather than requiring a stat."""
+    if _norm(a) == _norm(b):
+        return True
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def interrupted_saves(sb):
     """Shared temp names, missing fsync, or broad cleanup destroy isolation."""
     path = os.path.join(sb, "settings.toml")
@@ -280,7 +303,13 @@ def interrupted_saves(sb):
     assert len(replaced) == 2 and len({row[0] for row in replaced}) == 2, \
         "concurrent saves collided on a shared temporary file"
     for src, dst, parsed, stamp in replaced:
-        assert os.path.dirname(src) == sb and dst == path, "temp must share destination directory"
+        # SAME DIRECTORY, by the filesystem's answer rather than by string.
+        # tempfile normalises the dir it is handed, so a sandbox root spelled
+        # with forward slashes — which AGENT_TEST_TMP legitimately is on
+        # Windows — made this assertion fail on a save that was correct. A
+        # test that fails for the spelling of its own fixture teaches nothing
+        # about atomicity.
+        assert _same_dir(os.path.dirname(src), sb) and _same_file(dst, path),             f"temp must share destination directory: {src!r} vs {sb!r}"
         assert parsed == cfg, "replacement saw incomplete settings"
         assert stamp in synced, "temporary settings were not flushed and fsynced before replacement"
         assert not os.path.exists(src), "failed writer leaked its own temporary file"

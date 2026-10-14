@@ -456,6 +456,57 @@ TOOL_NAMES = {t["function"]["name"] for t in TOOL_DEFS}
 SUBQUERY_MAX_CHARS = 120_000    # per slice; bigger material = more slices
 
 
+class SliceTooBig(ValueError):
+    """A requested slice is over the per-slice budget. Named, so the caller
+    can tell a refusal apart from an unreadable file."""
+
+
+def read_slice(path, start_line=None, end_line=None,
+               max_chars=SUBQUERY_MAX_CHARS):
+    """Read ONLY lines [start_line..end_line], and stop at the budget.
+
+    This used to be `f.readlines()`: the whole file became a resident list
+    before a two-line slice was cut out of it. That is the opposite of the
+    claim `subquery` exists to make — the material stays OUT of the window —
+    and the material is exactly the kind of thing that is large: a corpus,
+    a log, an export. Peak memory now scales with the SLICE, a line past
+    `end_line` is never read, and the budget is enforced while reading
+    rather than after the whole slice is in hand.
+
+    Returns (text, first_line, last_line). Raises SliceTooBig when the slice
+    exceeds `max_chars`, ValueError when the range selects nothing, and
+    leaves OSError from the open to the caller.
+    """
+    a = max(1, int(start_line or 1))
+    b = int(end_line) if end_line else None
+    if b is not None and b < a:
+        raise ValueError(f"empty slice ({a}..{b})")
+    out, size, seen = [], 0, 0
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for n, line in enumerate(f, 1):
+            seen = n
+            if n < a:
+                continue
+            if b is not None and n > b:
+                seen = n - 1
+                break
+            size += len(line)
+            if size > max_chars:
+                raise SliceTooBig(
+                    f"slice passed {max_chars} chars at line {n}; keep "
+                    f"slices under {max_chars} — subquery smaller "
+                    f"ranges and combine the answers")
+            out.append(line)
+    if not out:
+        raise ValueError(f"empty slice ({a}..{b if b is not None else seen}"
+                         f" of {seen} lines)")
+    # `seen` is the last line actually in the slice: end_line when the read
+    # stopped there, the file's last line when it ended first. Returning the
+    # REQUESTED end instead put lines that do not exist into the fence label
+    # the sub-call is shown — provenance must name what was read.
+    return "".join(out), a, seen
+
+
 def stop_text(stop):
     """Render a task's stop condition for context and the panel."""
     if not stop:
@@ -2572,19 +2623,13 @@ class Agent:
             # they ride the task's role.
             try:
                 p = self._safe_path(args["path"])
-                with open(p, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
+                piece, a, b = read_slice(p, args.get("start_line"),
+                                         args.get("end_line"))
             except (OSError, ValueError) as e:
+                # SliceTooBig is a ValueError, so the refusal and the
+                # unreadable file come back through one path, each saying
+                # which it was in its own message.
                 return f"ERROR: {e}"
-            a = max(1, int(args.get("start_line") or 1))
-            b = min(len(lines), int(args.get("end_line") or len(lines)))
-            if b < a:
-                return f"ERROR: empty slice ({a}..{b} of {len(lines)} lines)"
-            piece = "".join(lines[a - 1:b])
-            if len(piece) > SUBQUERY_MAX_CHARS:
-                return (f"ERROR: slice is {len(piece)} chars; keep slices "
-                        f"under {SUBQUERY_MAX_CHARS} — subquery smaller "
-                        f"ranges and combine the answers")
             instruction = str(args.get("instruction") or "").strip()
             if not instruction:
                 return "ERROR: subquery needs an instruction"
