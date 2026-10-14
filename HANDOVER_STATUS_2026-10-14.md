@@ -34,13 +34,31 @@ substitute for.
 
 | What | State |
 |---|---|
-| Remote `main` (`reda-baqechame/self-learning-24.7-agent`) | **unchanged at `53bbb279`** — none of this work is on `main` until PR #28 is merged |
-| [PR #28](https://github.com/reda-baqechame/self-learning-24.7-agent/pull/28) | open, mergeable, against `main`, from `redabaquechame:fix/handover-defects-2026-10-14` (the logged-in account has no push access to the main repository, so the branch lives on the fork — the same route as PRs #26 and #27) |
-| Commits on the PR | `e391174` the twelve fixes and the two documents · `5f5fdec` the endurance-test flake (below) · a third regenerating `EVIDENCE.md` from a full run of the exact pushed tree |
+| Remote `main` (`reda-baqechame/self-learning-24.7-agent`) | **`85aac33` — PR #28 merged by `reda-baqechame` on 14 October 2026, 22:19 UTC.** Everything in this document's §4 is on `main` |
+| [PR #28](https://github.com/reda-baqechame/self-learning-24.7-agent/pull/28) | **merged** (opened from `redabaquechame:fix/handover-defects-2026-10-14`; that account has read-only access to the main repository, so the owner account merged it) |
+| Commits on the PR | `e391174` the twelve fixes and the two documents · `5f5fdec` the endurance-test flake (below) · `8c1bde6` `RESEARCH_FOUNDATIONS.md` and `EVIDENCE.md` regenerated from a full run of the pushed tree · `aa3125a` changelog entries v14 and v15, test counts. CI green on all 6 jobs at `aa3125a` |
 | CI on the first push | **5 of 6 jobs green.** Windows/Python 3.13 failed `test_endurance` on a single slow last batch (1.17s against a 0.17s median) — a hosted-runner stall, not a slowdown: the same code was flat on Windows 3.11, spiked once mid-run on 3.12, and pristine `main` shows the same kind of spike on the same job. The latency check judged one sample; it now re-measures an outlier on fresh work, so a real trend still fails and a stall clears, and the judge itself is tested both ways. |
 | CI on the second push (`5f5fdec`) | **all 6 jobs green** (Ubuntu + Windows × Python 3.11/3.12/3.13), plus the automated review check |
 | Local full run on `5f5fdec` | **161 executed — 156 passed, 5 skipped, 0 failed**; `EVIDENCE.md` regenerated from that run (156/161, 919 observations) |
 | Not pushed, by design | the Screen Tutor worktree (owned by another working session, PAUSED — see H04), and the other local worktrees (H05) |
+
+## 1b-ii. What remains outside `main`, and why it was not merged
+
+Checked on 14 October 2026 against every branch on this computer, on
+`origin` and on the fork. **Nothing that was built is lost — every piece is
+on GitHub.** Exactly two bodies of work are not on `main`, and both were
+kept out deliberately:
+
+| Work | Where it is preserved | Size | Merges onto `main` today? | Why it was not merged |
+|---|---|---|---|---|
+| Screen Tutor | fork, `wip/screen-tutor-snapshot-2026-10-14` (byte-identical to the working folder); an earlier SC-0A checkpoint on `screen-tutor/sc-0a-bootstrap` is superseded by it | 629 files | **no** — conflicts in `ui.html`, `README.md`, `ARCHITECTURE.md`, `REFERENCE.md`, `tests/test_effects.py`, `tests/test_frontend.py` | 5 of 38 work packages accepted; the build is PAUSED by owner instruction and owned by another working session; never through CI or review |
+| Deeper Twin (Phase 10.1) | fork, `codex/twin-depth-reconciliation` (5 commits; it contains `phase10.1/twin-depth` and is byte-identical to the uncommitted state of `remediation-worktree`) | 23 files | **no** — conflicts in `doctor.py`, `mutate_check.py`, `tests/run_all.py`, `CHANGELOG.md`, `README.md`, `ARCHITECTURE.md`, `REFERENCE.md` | its own checkpoint withholds acceptance: capture authority, containment, recovery, snapshots, enrolment and signing gates are open (F15) |
+
+The safe path to `main` for each is the one PR #28 took: reconcile onto the
+current `main`, run the full suite and the mutation check, pass CI, close the
+work's own acceptance gates, then review and merge. Pushing either one
+straight to `main` would put unreviewed, conflicting work into the product
+being handed over.
 
 ## 1c. Everything Codex built, and where each piece lives
 
