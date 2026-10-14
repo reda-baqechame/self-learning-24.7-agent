@@ -10,7 +10,7 @@ by a command, and every claim about what is *proven* is bounded in §17.
 | Product | **Expert Fleet** — a platform for building expert AI agents that work continuously, prove what they did, and remember what they learned |
 | Second product, same tree | **Screen Tutor** — a native companion that watches a screen and teaches; partially built, see §16 |
 | Code | 124 Python modules, 56.7k lines, **Python standard library only** — no framework, no database, no build step |
-| Tests | 161 registered acceptance scripts · 223 registered mutations · 6 CI jobs (Ubuntu + Windows × Python 3.11/3.12/3.13) |
+| Tests | 161 registered acceptance scripts · 225 registered mutations · 6 CI jobs (Ubuntu + Windows × Python 3.11/3.12/3.13) |
 | Interfaces | one HTML control panel (49 HTTP endpoints) · 186 CLI subcommands across 42 modules |
 | State | plain files on disk that the owner owns. No hosted component, nothing phones home |
 | Model | provider-universal: OpenRouter, Anthropic, OpenAI, Gemini, xAI, DeepSeek, Groq, NVIDIA, Hugging Face, Cloudflare Workers AI, or a local Ollama with no key at all |
@@ -318,7 +318,7 @@ or expert data).
 | Proof levels | `proof.py` | **20 capabilities**, each at one of 6 levels: SPEC → IMPLEMENTED → OFFLINE VERIFIED → LIVE VERIFIED → ADVERSARIAL/STRESS VERIFIED → PRODUCTION PROVEN. Evidence is bound to a code hash; live evidence expires; **no endpoint accepts a level** |
 | Evidence report | `evidence.py` | **13 systems**, each with its tests *and its stated blind spot*; every test prints a sentence describing what it observed and the report quotes them |
 | Acceptance suite | `tests/run_all.py` | 161 registered scripts; `tests/test_invariants.py` enumerates rather than exemplifies (every subprocess call site, every control file, every credential source against every subsystem, all CLI subcommands the manual promises …) |
-| Mutation testing | `mutate_check.py` | 223 registered mutations: break the behaviour, require its test to go red. A MISSED row is a test that measures nothing |
+| Mutation testing | `mutate_check.py` | 225 registered mutations: break the behaviour, require its test to go red. A MISSED row is a test that measures nothing |
 | Held-out evaluation | `evalsuite.py` | a score you are allowed to believe: sealed holdouts recorded against the code hash that spent them |
 | Lift / learning experiments | `benchmark.py`, `learn_bench.py` | what the harness adds to the rented model, and longitudinal amortization — **both still awaiting a provider key** (§17) |
 | Metrics | `metrics.py` | the twelve numbers, including verified-success rate, false-success, autonomy and amortization |
@@ -595,6 +595,8 @@ once wrong and how it was proven.
 ## Reading order for the rest of the documentation
 
 1. `README.md` — the tour, with the comparison table and the evidence summary
+1. `RESEARCH_FOUNDATIONS.md` — why it is built this way: the studies, the
+   inspirations, and the preregistered experiments
 2. `QUICKSTART.md` — 15 minutes from zero to a first VERIFIED goal
 3. `ARCHITECTURE.md` — the complete technical account
 4. `REFERENCE.md` — every module, setting, endpoint and event name

@@ -276,6 +276,12 @@ things that make its output verifiable: a *gate* that must exit zero before
 that make yesterday's failure cheap, and a *proof system* in which no status
 can be set by hand.
 
+**→ [RESEARCH_FOUNDATIONS.md](RESEARCH_FOUNDATIONS.md) is the lab's account of
+why it is built this way** — each mechanism traced to the studies that
+motivated it, the inspirations from outside machine learning, the
+preregistered experiments that will prove or disprove the benefit, and ~60
+references verified against arXiv.
+
 **→ [PLATFORM_MAP.md](PLATFORM_MAP.md) is the map of what is what** — every
 subsystem, every lane, every module and what it is for, in one document, with
 the honest ceiling at the end. **[HANDOVER_STATUS_2026-10-14.md](HANDOVER_STATUS_2026-10-14.md)**

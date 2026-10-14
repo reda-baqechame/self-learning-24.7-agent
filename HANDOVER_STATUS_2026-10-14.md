@@ -30,6 +30,50 @@ substitute for.
 
 ---
 
+## 1b. Where it stands on GitHub
+
+| What | State |
+|---|---|
+| Remote `main` (`reda-baqechame/self-learning-24.7-agent`) | **unchanged at `53bbb279`** — none of this work is on `main` until PR #28 is merged |
+| [PR #28](https://github.com/reda-baqechame/self-learning-24.7-agent/pull/28) | open, mergeable, against `main`, from `redabaquechame:fix/handover-defects-2026-10-14` (the logged-in account has no push access to the main repository, so the branch lives on the fork — the same route as PRs #26 and #27) |
+| Commits on the PR | `e391174` the twelve fixes and the two documents · `5f5fdec` the endurance-test flake (below) · a third regenerating `EVIDENCE.md` from a full run of the exact pushed tree |
+| CI on the first push | **5 of 6 jobs green.** Windows/Python 3.13 failed `test_endurance` on a single slow last batch (1.17s against a 0.17s median) — a hosted-runner stall, not a slowdown: the same code was flat on Windows 3.11, spiked once mid-run on 3.12, and pristine `main` shows the same kind of spike on the same job. The latency check judged one sample; it now re-measures an outlier on fresh work, so a real trend still fails and a stall clears, and the judge itself is tested both ways. |
+| CI on the second push (`5f5fdec`) | **all 6 jobs green** (Ubuntu + Windows × Python 3.11/3.12/3.13), plus the automated review check |
+| Local full run on `5f5fdec` | **161 executed — 156 passed, 5 skipped, 0 failed**; `EVIDENCE.md` regenerated from that run (156/161, 919 observations) |
+| Not pushed, by design | the Screen Tutor worktree (owned by another working session, PAUSED — see H04), and the other local worktrees (H05) |
+
+## 1c. Everything Codex built, and where each piece lives
+
+Codex did most of the recent build work, in its own branches and folders.
+Checked branch by branch against both GitHub remotes on 14 October:
+
+| Codex branch | What it is | On `main`? | On GitHub? | Left in its local folder |
+|---|---|---|---|---|
+| `codex/verified-learning-hardening` | verified-learning hardening | **merged** | yes | — |
+| `codex/twin-measurement-integrity` | Twin measurement repair (PR #22) | **merged** | yes | 7 evidence logs |
+| `codex/user-workflow-completion` | truthful mission/goal starts, contract validation (PR #23) | **merged** | yes | — |
+| `codex/bounded-computer-use` (+ `-integration`) | bounded browser authority, sealed observations | **merged** | yes | 16 evidence logs |
+| `codex/cu1-independent-postconditions` | independent computer-action postconditions (PRs #26, #27) | **merged** | yes (fork) | 1 evidence folder |
+| `codex/twin-depth-reconciliation` | the deeper Twin: capture, consent at the entry point, cold start, augmentation | **not merged — 5 commits ahead** | yes (fork), unreviewed | 3 evidence logs |
+| `codex/screen-tutor-build` | Screen Tutor: native companion, learning contracts, teaching packs, 38-packet plan | **not merged — 1 commit ahead** | **no — not on either remote** | **20 modified + 77 untracked entries (626 files of source and evidence)** |
+
+Read the right-hand column carefully. **Every finished Codex feature is on
+`main`.** The "modified" files the merged folders still show (`ui.html`,
+`tests/mock_effect_server.py`) have **zero real diff** — they are the
+line-ending rewrite N04 fixes, nothing lost. What is left is *evidence
+logs* (suite and mutation receipts), which matter for the verification
+trail but are not code. The two pieces of real unmerged work are the Twin
+depth candidate (safe on the fork, awaiting review — F15) and the Screen
+Tutor (in no repository — H04).
+
+Codex also produced work that was never meant for git, all inside the
+OneDrive project folder: the build plans (`planning/` — the Screen Tutor
+master plan, requirements, reconciliation and execution state), the two
+audits (`audit-2026-09-07/`, `audit-handover-2026-10-12/` — the 37-finding
+register this document builds on), market research (`research/`), and
+packaged handoffs (`exports/`). They are the design and audit record; a
+buyer should receive them alongside the repository.
+
 ## 2. Which bytes are the candidate
 
 | Build | Identity | State as of today |
@@ -196,7 +240,7 @@ product. After committing, retire the merged ones with
 `git worktree remove <path>`, keep the three that still hold work, and put
 one line at the top of each saying what it is for. I removed nothing.
 
-**H04 — a month of Screen Tutor work exists only on this machine.**
+**H04 — a month of Screen Tutor work is in no git repository.**
 `origin` was last pushed **12 September 2026**. The Tutor worktree carries
 **20 modified tracked files and 77 untracked entries** on top of commit
 `160fa4b`, and none of it is pushed anywhere. The good news: `.gitignore`
@@ -204,10 +248,13 @@ already excludes `companion/windows/**/bin|obj` and `tests/native/**/bin|obj`,
 so of the ~247 MB on disk (154 MB of it .NET build output)
 `git add -A --dry-run` would carry **626 files** — 299 evidence logs, 131
 JSON, 76 Markdown, 75 Python, 31 C#, 4 csproj, 3 XAML. That is source and
-evidence, not artefacts. A disk failure, a stray `git clean`, or a OneDrive
-sync conflict loses weeks of work that no backup covers. **Commit it to its
-branch and push it today**, even unreviewed and behind a `wip/` name —
-reviewing a pushed branch is easy, recovering an unpushed one is impossible.
+evidence, not artefacts. The project folder sits inside OneDrive, so the
+files are most likely synced to the cloud — but OneDrive is a file copy, not
+version control: it keeps no commit history, it cannot tell a deliberate
+change from a sync conflict, and a stray `git clean` or a conflicted sync
+replicates the loss. **Commit it to its branch and push it**, even
+unreviewed and behind a `wip/` name — reviewing a pushed branch is easy,
+reconstructing an unpushed one from synced files is not.
 (The branch is currently PAUSED and owned by another working session; the
 push is the owner's call, which is why I did not stage anything in it.)
 
@@ -333,7 +380,7 @@ Useful to have written down, because the platform's own standard is that a
 claim without a test is a defect.
 
 **Say this.** 124 stdlib-only Python modules; 161 registered acceptance
-scripts and 223 registered mutations; 6 CI jobs across Ubuntu and Windows ×
+scripts and 225 registered mutations; 6 CI jobs across Ubuntu and Windows ×
 Python 3.11/3.12/3.13 green on the audited baseline; 0 execution-authority
 bypasses across the tree; frozen caller-authored graders sealed outside the
 worker's reach with a TAMPER verdict if edited; a model-free procedure
