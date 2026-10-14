@@ -128,6 +128,8 @@ pre.out{background:var(--code);border:1px solid var(--line);border-radius:8px;
   border-radius:4px}
 .tag.trained{background:var(--accbg);color:var(--acc2)}
 .tag.quick{background:var(--warnbg);color:var(--warn)}
+.tag.studied{background:var(--okbg);color:var(--ok)}
+.tag.untrained{background:var(--bg2);color:var(--ink3)}
 .tag.retired{background:var(--bg2);color:var(--ink3)}
 /* subtabs inside a workspace */
 .subtabs{display:flex;gap:4px;flex-wrap:wrap;border-bottom:2px solid var(--line);
@@ -291,7 +293,9 @@ pre.out{background:var(--code);border:1px solid var(--line);border-radius:8px;
   <main id="main"><div class="empty">loading…</div></main>
 </div>
 
-<div id="ovl"><div id="dlg"><h3 id="dlgT"></h3><div class="db" id="dlgB"></div>
+<div id="ovl"><div id="dlg" role="dialog" aria-modal="true"
+     aria-labelledby="dlgT" tabindex="-1"><h3 id="dlgT"></h3>
+  <div class="db" id="dlgB"></div>
   <div class="df" id="dlgF"></div></div></div>
 
 <div id="cmdk" onclick="if(event.target.id==='cmdk')closeCmd()">
@@ -382,14 +386,68 @@ document.addEventListener("DOMContentLoaded", ()=>setTheme(currentTheme()));
 function toast(m){ const t=document.getElementById("toast");
   t.textContent=m; t.style.display="block";
   clearTimeout(t._h); t._h=setTimeout(()=>t.style.display="none", 2600); }
+let dlgReturn = null;          // the control that opened the dialog
+const DLG_FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),'
+  + 'select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+function dlgPairLabels(){
+  /* Every dialog body writes `<label class="lb">Text</label><input ...>`, so
+     a screen reader read the label and the field as two unrelated things.
+     Pairing them here fixes all of them at once, and keeps working for the
+     next dialog nobody has written yet. */
+  const box = document.getElementById("dlgB");
+  box.querySelectorAll("label").forEach((lb, i) => {
+    if (lb.getAttribute("for")) return;
+    if (lb.querySelector("input,select,textarea")) return;   // wrapping label
+    let n = lb.nextElementSibling, hops = 0;
+    while (n && hops++ < 3 && !n.matches("input,select,textarea"))
+      n = n.querySelector && n.querySelector("input,select,textarea") || n.nextElementSibling;
+    if (!n || !n.matches || !n.matches("input,select,textarea")) return;
+    // a control that already has its own label keeps it: pairing a second
+    // label onto it would make a screen reader announce the wrong question
+    if (n.id && box.querySelector('label[for="' + CSS.escape(n.id) + '"]')) return;
+    if (!n.id) n.id = "dlgf" + i + "_" + Math.random().toString(36).slice(2, 7);
+    lb.setAttribute("for", n.id);
+  });
+}
+function dlgTrap(e){
+  /* Focus stays inside an open modal. It used to leave on the first Tab,
+     which put the keyboard on the Create-specialist button behind the
+     overlay while the dialog was still the only thing a mouse could use. */
+  if (e.key !== "Tab") return;
+  const dlg = document.getElementById("dlg");
+  if (!document.getElementById("ovl").classList.contains("show")) return;
+  const items = [...dlg.querySelectorAll(DLG_FOCUSABLE)].filter(
+    el => el.offsetParent !== null || el === document.activeElement);
+  if (!items.length){ e.preventDefault(); dlg.focus(); return; }
+  const first = items[0], last = items[items.length - 1];
+  if (e.shiftKey && (document.activeElement === first || !dlg.contains(document.activeElement))){
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && (document.activeElement === last || !dlg.contains(document.activeElement))){
+    e.preventDefault(); first.focus();
+  }
+}
+document.addEventListener("keydown", dlgTrap, true);
 function showDlg(title, bodyHtml, buttons){
   document.getElementById("dlgT").innerHTML = title;
   document.getElementById("dlgB").innerHTML = bodyHtml;
   document.getElementById("dlgF").innerHTML = (buttons||[["Close","closeDlg()","ghost"]])
     .map(b=>`<button class="btn ${b[2]||""}" onclick="${b[1]}">${b[0]}</button>`).join("");
-  document.getElementById("ovl").classList.add("show");
+  const ovl = document.getElementById("ovl");
+  if (!ovl.classList.contains("show"))
+    dlgReturn = document.activeElement;      // only the OUTSIDE opener
+  ovl.classList.add("show");
+  dlgPairLabels();
+  const dlg = document.getElementById("dlg");
+  const first = dlg.querySelector(DLG_FOCUSABLE);
+  (first || dlg).focus();
 }
-function closeDlg(){ document.getElementById("ovl").classList.remove("show"); }
+function closeDlg(){
+  document.getElementById("ovl").classList.remove("show");
+  /* A dialog that returns the keyboard to the top of the document makes the
+     operator find their place again every time they cancel. */
+  if (dlgReturn && dlgReturn.focus) { try { dlgReturn.focus(); } catch (e) {} }
+  dlgReturn = null;
+}
 document.getElementById("ovl").addEventListener("click",
   e=>{ if(e.target.id==="ovl") closeDlg(); });
 document.addEventListener("keydown", e=>{ if(e.key==="Escape"){ closeCmd(); closeDlg(); } });
@@ -436,10 +494,10 @@ const COMMANDS = [
   ["How should it choose a model?", "admin", "openModelPolicy()", "python modelrouter.py", "policy cheapest balanced quality model routing"],
   ["Plan what to study first", "resources", "S.resTab='knowledge';go('resources')", "python curriculum.py --root experts/<slug> --course <c> --plan", "curriculum study order lessons"],
   ["Open an agent's goal cockpit", "work", "openAgentAction('goals')", "python contract.py show experts/<slug> <goal-id>", "cockpit pursuit contract graders ledger steering budget"],
-  ["Steer a running pursuit", "work", "S.sub='goals';go('agents')", "python steer.py add experts/<slug> <goal-id> \"guidance\"", "steer guide advise course correct nudge"],
-  ["See the knowledge graph", "resources", "S.sub='graph';go('agents')", "python knowledge.py summary experts/<slug>", "graph entities edges atoms memory map visualize"],
-  ["Mastery — sealed exams and scores", "resources", "S.sub='mastery';go('agents')", "python mastery.py status <home> <expert> <pack>", "mastery capability pack exam competence transfer retention verdict"],
-  ["What may no longer be true?", "resources", "S.sub='teach';go('agents')", "python freshness.py scan experts/<slug>", "freshness expired superseded retracted stale decay"],
+  ["Steer a running pursuit", "work", "openAgentAction('goals')", "python steer.py add experts/<slug> <goal-id> \"guidance\"", "steer guide advise course correct nudge"],
+  ["See the knowledge graph", "resources", "openAgentAction('graph')", "python knowledge.py summary experts/<slug>", "graph entities edges atoms memory map visualize"],
+  ["Mastery — sealed exams and scores", "resources", "openAgentAction('mastery')", "python mastery.py status <home> <expert> <pack>", "mastery capability pack exam competence transfer retention verdict"],
+  ["What may no longer be true?", "resources", "openAgentAction('teach')", "python freshness.py scan experts/<slug>", "freshness expired superseded retracted stale decay"],
   ["Switch light / dark theme", "nav", "toggleTheme()", "", "theme light dark palette appearance mode color"],
   ["Adjust intelligence & cost lane", "admin", "openModelPolicy()", "python providers.py set-role <role> --provider openrouter --model <id>", "lane models cheap free dirt intelligence dial cost per step wiring adjust llm"],
 ];
@@ -652,6 +710,31 @@ function routeChanged(){
 }
 window.addEventListener("hashchange", routeChanged);
 window.addEventListener("popstate", routeChanged);
+function statusPill(t){
+  /* "done" with no declared gate is not the same fact as "done" the gate
+     accepted, and the panel used to print one word for both. check_done
+     trusts a task that declared nothing — so the absence is named here
+     rather than implied. */
+  const s = t.status || "";
+  if (s === "done" && !t.done_check)
+    return `<span class="pill queued" title="this task declared no done-check, so nothing mechanical was run against it">done (unverified)</span>`;
+  return `<span class="pill ${esc(s)}">${esc(s)}</span>`;
+}
+function laneTag(e){
+  /* The lane an agent was CREATED by is not a measurement of what it knows.
+     One tag used to say both: a brand-new expert from the full wizard read
+     TRAINED with no course, no task and no exam, so a creation choice looked
+     like demonstrated competence. Two facts, two tags — and the second one is
+     read from what is on disk. */
+  const lane = e.quick
+    ? `<span class="tag quick" title="created by the quick lane: one briefing, no course">QUICK</span>`
+    : `<span class="tag trained" title="created by the full lane: course slots, roles and memory">FULL</span>`;
+  const n = ((e.courses)||[]).length;
+  const state = n
+    ? `<span class="tag studied" title="${n} course(s) on disk — competence itself is measured on Proof and Mastery, not here">${n} COURSE${n===1?"":"S"}</span>`
+    : `<span class="tag untrained" title="no course studied and no assessment on record">UNTRAINED</span>`;
+  return lane + " " + state;
+}
 function go(view){ S.view=view; S.sel=null; closeCmd(); render(); }
 /* The model policy lives on ONE agent's Advanced tab, because that is where
    it takes effect. From the palette there may be no agent selected, so pick
@@ -973,9 +1056,11 @@ async function renderHome(m){
     <span class="kchip"><b>${usd(d.spend_today_usd)}</b>spent today</span>
   </div>
   <div class="muted" style="font-size:12px;margin:2px 0 6px;letter-spacing:.02em">
-    every task here is <b>gated</b> (done = a command passing, never a claim) →
-    <b>examined</b> by a second model family → <b>cited</b> or refused →
-    <b>archived</b> forever · <a href="javascript:go(&#39;guide&#39;)">how it works</a></div>
+    a task that declares a done-check is <b>gated</b> by it (done = that
+    command passing, never a claim) → <b>examined</b> by a second model
+    family where a reviewer role is wired → <b>cited</b> or refused →
+    <b>archived</b> forever. Work that declared no check is marked
+    <b>done (unverified)</b> wherever it is shown · <a href="javascript:go(&#39;guide&#39;)">how it works</a></div>
   <div class="card"><h3>Fleet activity<span class="spacer"></span>
     <button class="btn ghost sm" onclick="render()">refresh</button></h3>
     <div class="body tablewrap"><table><thead><tr>
@@ -984,7 +1069,7 @@ async function renderHome(m){
       ${d.experts.map(e=>`<tr class="click" onclick="openAgent('${esc(e.name)}')">
         <td><span class="row" style="gap:8px;flex-wrap:nowrap">${avatar(e.name,26)}
           <b class="mono">${esc(e.name)}</b>
-          <span class="tag ${e.quick?"quick":"trained"}">${e.quick?"QUICK":"TRAINED"}</span></span><br>
+          ${laneTag(e)}</span><br>
           <span class="muted" style="font-size:12px">${esc(e.identity||"")}</span></td>
         <td>${hb(e.heartbeat, e.running)}</td>
         <td class="num">${e.tasks.running?`<span class="pill running">${e.tasks.running} running</span> `:""}
@@ -1319,7 +1404,9 @@ function renderGuide(m){
 
   <div class="card"><h3>1 · The two kinds of agents — and when to use each</h3>
   <div class="body">
-    <p><span class="tag trained">TRAINED</span> <b>Trained expert</b> — for depth you'll
+    <p><span class="tag trained">FULL</span> <b>Trained expert</b> — the badge on
+    an agent says which lane made it, and the tag beside it says what it has
+    actually studied, because those are two different facts. For depth you'll
     rely on for months. You feed it whole courses (videos, books, folders, links); it
     studies them into <b>cited notes</b>, proves each skill against a checkable spec,
     then sits <b>closed-book exams</b>. Slow to build, extremely hard to fool.</p>
@@ -1519,7 +1606,7 @@ async function renderAgents(m){
   ${d&&d.n_experts?`<div class="agrid">${d.experts.map(e=>`
     <div class="acard" onclick="openAgent('${esc(e.name)}')">
       <h4>${avatar(e.name)}<span class="mono">${esc(e.name)}</span>
-        <span class="tag ${e.quick?"quick":"trained"}">${e.quick?"QUICK":"TRAINED"}</span>
+        ${laneTag(e)}
         <span style="margin-left:auto">${hb(e.heartbeat,e.running)}</span></h4>
       <div class="id">${esc(e.identity||"no specialty written yet")}</div>
       <div class="stats">
@@ -2026,7 +2113,7 @@ async function renderWorkspace(m){
     <button class="btn ghost sm" onclick="go('agents')">← all agents</button>
     ${avatar(S.sel, 40)}
     <h1 class="mono">${esc(S.sel)}</h1>
-    <span class="tag ${row.quick?"quick":"trained"}">${row.quick?"QUICK":"TRAINED"}</span>
+    ${laneTag(row)}
     ${hb(row.heartbeat, d.running)}
     <span class="spacer"></span>
     <button class="btn sm ${d.running?"":"pri"}"
@@ -2631,7 +2718,7 @@ function taskTable(tasks){
   return `<div class="tablewrap"><table><thead><tr><th>status</th><th>role</th><th>goal</th>
     <th>steps</th><th>cost</th><th>when</th></tr></thead><tbody>
     ${tasks.map(t=>`<tr class="click" onclick='taskDlg(${esc(JSON.stringify(t))})'>
-      <td><span class="pill ${esc(t.status)}">${esc(t.status)}</span>
+      <td>${statusPill(t)}
         ${t.archived?`<span class="pill dim">archived</span>`:""}
         ${statusReason(t)}</td>
       <td class="mono">${esc(t.role)}</td>
@@ -2795,7 +2882,7 @@ function diagnosisHtml(t){
 function taskDlg(t){
   if (typeof t === "string") t = JSON.parse(t);
   showDlg("Task · "+esc(t.id||""), `
-    <p><span class="pill ${esc(t.status)}">${esc(t.status)}</span>
+    <p>${statusPill(t)}
       <span class="mono">${esc(t.role)}</span>
       ${t.course?`· course <span class="mono">${esc(t.course)}</span>`:""}
       · attempt ${t.attempt||1} · ${usd(t.cost)}</p>
@@ -3283,7 +3370,16 @@ async function loadSelf(){
    catch, so it is worth catching on its own panel. */
 async function loadProcedures(){
   const el = document.getElementById('procBody'); if (!el) return;
+  el.innerHTML = `<span class="muted">reading the procedure library…</span>`;
   const d = await api('/api/runbooks?expert='+encodeURIComponent(S.sel));
+  if (!d || d.error){
+    el.innerHTML = `<div class="empty">the procedure library could not be read:
+      <span class="mono">${esc((d&&d.error)||"no response")}</span><br>
+      <span class="muted">this is a failed read, not an empty library — the
+      file may be unreadable or the panel may have lost the server</span><br>
+      <button class="btn sm" onclick="loadProcedures()">try again</button></div>`;
+    return;
+  }
   const rows = (d && d.runbooks) || [];
   if (!rows.length){ el.innerHTML = `<span class="muted">nothing compiled yet —
     a procedure is induced from repeated verified work, then must pass sealed

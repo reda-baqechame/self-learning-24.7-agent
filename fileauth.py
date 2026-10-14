@@ -37,8 +37,8 @@ import errno
 import hashlib
 import json
 import os
+import secrets
 import time
-import uuid
 
 # ------------------------------------------------------------------- zones
 
@@ -384,28 +384,55 @@ def write_text(root, rel, text, actor="agent", encoding="utf-8", durable=False):
     replace. A crash mid-write leaves the previous file whole rather than a
     truncated one, and two writers cannot share a scratch name."""
     p = resolve(root, rel, "write", actor)
-    os.makedirs(os.path.dirname(p) or root, exist_ok=True)
-    # a UUID, not PID + milliseconds: two writers in one process aiming at
-    # one target inside the same millisecond must never share a scratch
-    # name (docs/DESIGN-P6.1, finding 6)
-    tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    with open(tmp, "w", encoding=encoding) as f:
-        f.write(text)
-        if durable:
-            f.flush()
-            os.fsync(f.fileno())
-    for attempt in range(8):
+    return _atomic_write(p, text, mode="w", encoding=encoding, durable=durable)
+
+
+def _atomic_write(path, value, *, mode="wb", encoding=None, durable=False):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    # Exclusive creation keeps concurrent writers separate; a short name in
+    # the same directory avoids extending a valid Windows target past MAX_PATH.
+    descriptor, temporary = _staging_file(directory)
+    try:
+        with os.fdopen(descriptor, mode, encoding=encoding, closefd=False) as stream:
+            stream.write(value)
+            if durable:
+                stream.flush()
+                os.fsync(stream.fileno())
+        os.close(descriptor)
+        descriptor = None
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                return path
+            except PermissionError:        # OneDrive briefly holds the target
+                time.sleep(0.05 * (attempt + 1))
+            except OSError as error:
+                if error.errno != errno.EACCES:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        os.replace(temporary, path)
+        return path
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
         try:
-            os.replace(tmp, p)
-            return p
-        except PermissionError:            # OneDrive briefly holds the target
-            time.sleep(0.05 * (attempt + 1))
-        except OSError as e:
-            if e.errno != errno.EACCES:
-                raise
-            time.sleep(0.05 * (attempt + 1))
-    os.replace(tmp, p)
-    return p
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _staging_file(directory):
+    # Match ordinary open(..., "w"/"wb") permissions under the process umask,
+    # without reading/changing that process-wide setting in a concurrent writer.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    for _ in range(128):
+        path = os.path.join(directory, ".w" + secrets.token_urlsafe(6))
+        try:
+            return os.open(path, flags, 0o666), path
+        except FileExistsError:
+            continue
+    raise FileExistsError("Could not create an exclusive atomic staging file.")
 
 
 def read_bytes(root, rel, actor="agent"):
@@ -433,25 +460,7 @@ def write_bytes(root, rel, data, actor="agent"):
     temp-beside-target-then-replace — for artifacts that are not text (a
     workbook). One mutation semantic, whatever the payload."""
     p = resolve(root, rel, "write", actor)
-    os.makedirs(os.path.dirname(p) or root, exist_ok=True)
-    # a UUID, not PID + milliseconds: two writers in one process aiming at
-    # one target inside the same millisecond must never share a scratch
-    # name (docs/DESIGN-P6.1, finding 6)
-    tmp = f"{p}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    for attempt in range(8):
-        try:
-            os.replace(tmp, p)
-            return p
-        except PermissionError:
-            time.sleep(0.05 * (attempt + 1))
-        except OSError as e:
-            if e.errno != errno.EACCES:
-                raise
-            time.sleep(0.05 * (attempt + 1))
-    os.replace(tmp, p)
-    return p
+    return _atomic_write(p, data)
 
 
 def write_json(root, rel, obj, actor="agent", indent=1, durable=False):

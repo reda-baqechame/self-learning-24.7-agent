@@ -89,11 +89,11 @@ continuously, prove what they did, and remember what they learned.**
 [![tests](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/reda-baqechame/self-learning-24.7-agent/actions/workflows/tests.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![dependencies](https://img.shields.io/badge/dependencies-stdlib%20only-brightgreen)
-![tests](https://img.shields.io/badge/tests-160%20registered-blue)
-![mutations](https://img.shields.io/badge/mutation%20tests-216%20registered-blue)
+![tests](https://img.shields.io/badge/tests-161%20registered-blue)
+![mutations](https://img.shields.io/badge/mutation%20tests-225%20registered-blue)
 ![license](https://img.shields.io/badge/license-AGPL--3.0-orange)
 
-124 Python modules · 160 registered acceptance tests · one HTML control panel · no
+124 Python modules · 161 registered acceptance tests · one HTML control panel · no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 ```bash
@@ -245,7 +245,7 @@ are laws with tests that would fail, not features with descriptions.**
 | Long context | a bigger window | **recursive sub-calls** (the RLM result, MIT 2025): the material never enters the window — slices go to disposable sub-calls on the cheapest rail, only distilled answers return, metered and contained like every call |
 | New tools | a fixed integration catalogue, or an agent that installs what it likes | **the capability frontier**: an agent may PROPOSE a tool it lacks, never author the test — it declares an import or a binary, the *platform* generates the probe, and the probe must FAIL before anything is installed. Readiness is decided by a seal outside the agent's reach, and a human adopts it from a terminal |
 | Knowing what a goal needs | a prompt asking the model to list its tools | two measured corpora, 50 goals across 40+ trades, pinned as tests. The broad set went **24% → 100%** honest coverage; the adversarial set found that **5 goals carrying irreversible physical or financial effects did not stop for the owner** — cutting power to a heater, changing a CNC feed rate, filing a claim in your name — because every authority rule was about a digital permission and none about a machine that moves. Now 0 |
-| Dependencies | large stacks | Python stdlib. Zero. 160 registered tests; six configured CI jobs (current results must be inspected separately) |
+| Dependencies | large stacks | Python stdlib. Zero. 161 registered tests; six configured CI jobs (current results must be inspected separately) |
 | Your state | often hosted, often theirs | files you own, provider-universal (any key, or a zero-key local model) — the model is a swappable part; the memory, graders, runbooks and ledgers are the asset |
 
 Four shipped archetypes cover the famous products' ground on this
@@ -275,6 +275,18 @@ things that make its output verifiable: a *gate* that must exit zero before
 "done" is accepted, a *mission contract* held outside the transcript, ledgers
 that make yesterday's failure cheap, and a *proof system* in which no status
 can be set by hand.
+
+**→ [RESEARCH_FOUNDATIONS.md](RESEARCH_FOUNDATIONS.md) is the lab's account of
+why it is built this way** — each mechanism traced to the studies that
+motivated it, the inspirations from outside machine learning, the
+preregistered experiments that will prove or disprove the benefit, and ~60
+references verified against arXiv.
+
+**→ [PLATFORM_MAP.md](PLATFORM_MAP.md) is the map of what is what** — every
+subsystem, every lane, every module and what it is for, in one document, with
+the honest ceiling at the end. **[HANDOVER_STATUS_2026-10-14.md](HANDOVER_STATUS_2026-10-14.md)**
+is the current state of the work: what is done, what is not, and what each
+remaining item needs.
 
 **→ [ARCHITECTURE.md](ARCHITECTURE.md) is the complete technical account** —
 the problem, the thesis, the eleven concepts, how a task actually runs, why I
@@ -669,7 +681,7 @@ build is cleared.** The full table is in
 
 ```bash
 python demo.py            # the whole platform, keyless, in one run
-python tests/run_all.py   # 160 registered acceptance tests
+python tests/run_all.py   # 161 registered acceptance tests
 python proof.py           # what is proven, and to what level
 python evidence.py        # why we believe it, and where belief runs out
 python metrics.py         # is it working — and the numbers it refuses to invent

@@ -103,20 +103,68 @@ def check_the_hot_queue_stays_bounded(root):
     return per_batch
 
 
-def check_latency_does_not_degrade(per_batch):
-    """The number that decides whether this is a 24/7 platform."""
+def check_latency_does_not_degrade(per_batch, remeasure=None, retries=2):
+    """The number that decides whether this is a 24/7 platform.
+
+    A DEGRADING loop and a STALLED runner both make one batch slow, and only
+    one of them is a defect. Hosted Windows runners stall for a batch at a
+    time — on PR #28 the same code ran 0.12-0.18s flat on 3.11, spiked to
+    0.86s in batch 2 on 3.12, and failed 3.13 only because its spike landed
+    on the last batch, the single sample this check reads. Pristine main
+    had a 0.61s spike in batch 5 on the same job. So an outlier last batch
+    is re-measured with fresh work: a loop that slows as its history grows
+    is slower STILL on the next batch (history only grew), while a stall
+    clears. Only a slowdown that persists through every re-measure fails.
+    """
     first, last = per_batch[0], per_batch[-1]
     median = statistics.median(per_batch)
     # a slow first batch (cold caches, first compile) is normal; the trend
     # that matters is late-vs-median
-    assert last < median * 3 + 0.5, (
-        f"per-task time went {first:.3f}s -> {last:.3f}s against a median of "
-        f"{median:.3f}s. Work that gets steadily slower as the ledgers fill "
-        f"is work that stops entirely at some point nobody planned for")
+    bound = median * 3 + 0.5
+    remeasured = []
+    while last >= bound and remeasure is not None and len(remeasured) < retries:
+        last = remeasure()
+        remeasured.append(last)
+    assert last < bound, (
+        f"per-task time went {first:.3f}s -> {per_batch[-1]:.3f}s against a "
+        f"median of {median:.3f}s"
+        + (f", and stayed above {bound:.3f}s on {len(remeasured)} fresh "
+           f"re-measure(s): {', '.join(f'{t:.3f}s' for t in remeasured)}"
+           if remeasured else "")
+        + ". Work that gets steadily slower as the ledgers fill is work that "
+        "stops entirely at some point nobody planned for")
+    note = (f"; the last batch read {per_batch[-1]:.2f}s, so it was "
+            f"re-measured on fresh work at "
+            f"{', '.join(f'{t:.2f}s' for t in remeasured)} — a stall, "
+            f"not a trend" if remeasured else "")
     print(f"[latency] per-task wall time across 6 batches: "
           f"{', '.join(f'{t:.2f}s' for t in per_batch)} — median "
-          f"{median:.2f}s, and the last batch is not an outlier: the loop "
-          f"does not get slower as its own history grows")
+          f"{median:.2f}s, and the last batch is not an outlier{note}: the "
+          f"loop does not get slower as its own history grows")
+
+
+def check_latency_judge_tells_stall_from_trend():
+    """The re-measure must not become a way to pass a real slowdown. Fed
+    synthetic batches, the judge passes a stall that clears, and fails a
+    loop that is slower again on fresh work and an outlier it cannot
+    re-measure."""
+    import contextlib
+    flat = [0.12, 0.17, 0.17, 0.17, 0.17]
+    # synthetic numbers must not print as a [latency] measurement, because
+    # evidence.py quotes every tagged line as something the suite observed
+    with contextlib.redirect_stdout(io.StringIO()):
+        check_latency_does_not_degrade(flat + [1.17], lambda: 0.18)  # stall
+    for name, per_batch, again in (
+            ("trend", flat + [1.17], iter([1.30, 1.55]).__next__),
+            ("no re-measure", flat + [1.17], None)):
+        try:
+            check_latency_does_not_degrade(per_batch, again)
+        except AssertionError:
+            continue
+        raise AssertionError(f"the latency judge passed a {name} it must fail")
+    print("[latency-judge] a one-batch stall that clears on fresh work "
+          "passes; a slowdown that persists on fresh work fails, and so does "
+          "an outlier that cannot be re-measured")
 
 
 def check_logs_rotate(root):
@@ -239,7 +287,21 @@ def main():
           f"(AGENT_SOAK_TASKS to change)")
     t0 = time.time()
     per_batch = check_the_hot_queue_stays_bounded(root)
-    check_latency_does_not_degrade(per_batch)
+    extra = []
+
+    def remeasure():
+        """One more batch on the SAME, now larger, history."""
+        a = loop.Agent(root)
+        batch = max(10, N // 6)
+        for i in range(batch):
+            a.add_task("practitioner", f"soak re-measure {len(extra)}-{i}")
+        t0 = time.time()
+        run_drain(root, timeout=900)
+        extra.append((time.time() - t0) / batch)
+        return extra[-1]
+
+    check_latency_does_not_degrade(per_batch, remeasure)
+    check_latency_judge_tells_stall_from_trend()
     check_logs_rotate(root)
     check_no_lock_outlives_its_holder(root)
     check_ledgers_stay_proportionate(root)

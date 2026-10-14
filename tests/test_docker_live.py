@@ -35,6 +35,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 
 from common import AGENT_DIR, make_sandbox, read_state, run_drain
 
@@ -262,27 +263,76 @@ def check_credentials_never_enter_the_container(root):
           f"image's own — both filters checked, not just the outer one")
 
 
+def _running(name):
+    """Is the container with this exact name still up?"""
+    q = subprocess.run(["docker", "ps", "-q", "--filter", f"name=^{name}$"],
+                       capture_output=True, text=True, timeout=30)
+    return bool(q.stdout.split())
+
+
 def check_a_timeout_kills_the_container(root):
-    """A hung command must not leave a container running forever."""
-    before = subprocess.run(["docker", "ps", "-q"], capture_output=True,
-                            text=True, timeout=30).stdout.split()
-    t0 = time.time()
-    rc, out, err = sandbox.run("sleep 60", root, {}, 6, _cfg(root))
-    took = time.time() - t0
-    assert took < 30, f"a 6-second timeout took {took:.1f}s to fire"
-    assert rc != 0, (rc, out, err)
-    assert "time" in (err or out or "").lower() or rc == 124 or rc == 127, \
-        f"the timeout was not reported: rc={rc} err={err[:200]!r}"
-    time.sleep(3)      # docker --rm needs a moment to reap
-    after = subprocess.run(["docker", "ps", "-q"], capture_output=True,
-                           text=True, timeout=30).stdout.split()
-    leaked = set(after) - set(before)
-    assert not leaked, (
-        f"the timed-out command left {len(leaked)} container(s) running: "
-        f"{leaked}. A 24/7 fleet would accumulate them until the machine died")
-    print(f"[timeout] a 60-second command under a 6-second ceiling was cut "
-          f"off in {took:.1f}s, reported as a failure, and left no container "
-          f"behind")
+    """A hung command must not leave ITS OWN container running forever.
+
+    This used to diff `docker ps -q` across the call and call every new id a
+    leak. On a shared daemon that is a false alarm with a mechanism: an audit
+    started one unrelated container during the window and the test reported
+    that known id as leaked while its own timed-out container was already
+    gone — a test that fails for something it does not own teaches the
+    operator to ignore it, which is worse than not having it.
+
+    So the owned container is identified by the name `sandbox.run` gives it,
+    and that one name is what must be absent afterwards. A second container
+    is started deliberately and left running across the check, as a standing
+    negative: the assertion must still pass with a stranger on the daemon.
+    """
+    owned = []
+    real_run = subprocess.run
+
+    def spy(argv, *a, **k):
+        if isinstance(argv, (list, tuple)) and "--name" in list(argv):
+            argv = list(argv)
+            owned.append(argv[argv.index("--name") + 1])
+        return real_run(argv, *a, **k)
+
+    # The same image the sandbox uses, so nothing is pulled for this.
+    stranger = f"audit-stranger-{uuid.uuid4().hex[:10]}"
+    real_run(["docker", "run", "-d", "--rm", "--name", stranger,
+              "--memory", "64m", "--entrypoint", "sleep",
+              sandbox.DOCKER_IMAGE, "120"],
+             capture_output=True, text=True, timeout=120)
+    try:
+        subprocess.run = spy
+        try:
+            t0 = time.time()
+            rc, out, err = sandbox.run("sleep 60", root, {}, 6, _cfg(root))
+            took = time.time() - t0
+        finally:
+            subprocess.run = real_run
+        assert took < 30, f"a 6-second timeout took {took:.1f}s to fire"
+        assert rc != 0, (rc, out, err)
+        assert "time" in (err or out or "").lower() or rc == 124 or rc == 127, \
+            f"the timeout was not reported: rc={rc} err={err[:200]!r}"
+        assert owned, ("the sandbox ran no named container, so this check "
+                       "cannot know what to look for")
+        mine = owned[-1]
+        for _ in range(20):               # docker --rm needs a moment to reap
+            if not _running(mine):
+                break
+            time.sleep(0.5)
+        assert not _running(mine), (
+            f"the timed-out command left its own container {mine} running. "
+            f"A 24/7 fleet would accumulate them until the machine died")
+        assert _running(stranger), (
+            "the standing negative container is gone, so this run did not "
+            "actually prove that a stranger on the daemon is ignored")
+        print(f"[timeout] a 60-second command under a 6-second ceiling was "
+              f"cut off in {took:.1f}s, reported as a failure, and left its "
+              f"own container ({mine}) gone — with one unrelated container "
+              f"deliberately running throughout, which an older daemon-wide "
+              f"diff reported as a leak")
+    finally:
+        real_run(["docker", "rm", "-f", stranger], capture_output=True,
+                 text=True, timeout=60)
 
 
 def check_the_resource_ceilings_are_real(root):

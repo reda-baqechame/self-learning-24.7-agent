@@ -37,7 +37,10 @@ def write_effect_server():
     """A tiny MCP server whose 'send' tool has a real side effect: it
     appends a line to sent.log beside the server. Counting lines in that
     file is the ground truth for 'how many times did the world get hit'."""
-    with open(COUNTER_SERVER, "w", encoding="utf-8") as f:
+    # newline="": COUNTER_SERVER is a tracked file, and a regenerated
+    # fixture that differs from the committed one only by line endings makes
+    # every suite run leave the tree dirty.
+    with open(COUNTER_SERVER, "w", encoding="utf-8", newline="\n") as f:
         f.write('''import json, os, sys
 LOG = os.environ.get("EFFECT_LOG", "sent.log")
 def reply(i, result=None, error=None):

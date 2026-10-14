@@ -1,5 +1,87 @@
 # Changelog
 
+## v15 — the handover pass: the claims a buyer reads, made true (2026-10-14)
+
+A verification pass over the whole project ahead of a handover
+(`HANDOVER_STATUS_2026-10-14.md`), two days after a 37-finding readiness
+audit. Twelve findings closed — seven from that audit's register, five found
+while re-verifying it — each pinned by `tests/test_handover_defects.py` or the
+test that came with it, and by nine new mutations (9 caught, 0 missed).
+
+### What changed
+
+- **The panel says only what is true.** A brand-new expert read TRAINED with
+  no course, task or exam, in three places; the creation lane (`QUICK` /
+  `FULL`) and the training state read from disk (`UNTRAINED`, or the course
+  count) are now two tags from two facts (F03, F03b). Home claimed every task
+  is gated and examined; it now states the gate law with its boundary, and
+  work that declared no check reads **done (unverified)** (F04). A failed
+  procedure read no longer renders as an empty library (F05).
+- **The panel is usable from a keyboard.** The dialog is a named modal —
+  `role="dialog"`, `aria-modal`, focus moved in and restored to the opener,
+  Tab contained, every label paired with its field once (F02). Four
+  agent-scoped shortcuts no longer drop the open agent (F01).
+- **`subquery` reads only its slice.** It loaded the whole file before
+  slicing; it now streams, stops at `end_line`, enforces the budget while
+  reading and labels the last line actually read — a two-line slice of a
+  20 MB corpus peaks at 25 KB instead of 25 MB (F18).
+- **The File Authority writes valid long Windows paths.** Its scratch name
+  appended ~45 characters, so a valid 245-character destination failed with
+  `FileNotFoundError` through the authority every platform write passes
+  (N01, ported from the Screen Tutor branch, `160fa4b`).
+- **Tests that failed for the wrong reason.** The docker cleanup check
+  diffed the whole daemon (F21); `test_providers` compared paths as strings,
+  so `main` was red on Windows with a forward-slash `AGENT_TEST_TMP` (N02);
+  two tests rewrote tracked files with CRLF and left the tree dirty after
+  every run (N04); `test_endurance` judged latency from one sample, so a
+  runner stall on the last batch failed CI — an outlier is now re-measured,
+  and the judge is tested both ways.
+
+### Documentation
+
+- **`RESEARCH_FOUNDATIONS.md`** — why the platform is built this way: each
+  mechanism traced to the studies behind it, the inspirations from outside
+  machine learning, the preregistered experiments that will prove or
+  disprove the benefit, and ~60 references, every arXiv ID verified against
+  the arXiv API.
+- **`PLATFORM_MAP.md`** — what every part is and does, all 124 modules.
+- **`HANDOVER_STATUS_2026-10-14.md`** — what is done, what is not, what each
+  remaining item needs, and an inventory of all branch work.
+- `EVIDENCE.md` regenerated from a full run of the released tree.
+
+### Evidence
+
+Windows 11 / Python 3.12.13: 161 executed — 156 passed, 5 skipped, 0 failed
+(pristine `main` on the same machine: 1 failed). CI green on Ubuntu and
+Windows × Python 3.11/3.12/3.13. 161 registered tests, 225 mutations.
+
+## v14 — truthful launches, measured Twin, bounded computer use (2026-09-05 → 09-12)
+
+Three lines of work merged in September, recorded here after the fact
+(PRs #22, #23, #26, #27).
+
+- **Twin measurement integrity (PR #22).** Retrospective Twin evaluation now
+  separates training, validation and final scenario groups, freezes
+  neighbours, binds and replays tamper-resistant evaluation receipts, and
+  refuses stale or malformed evidence; Twin status reports insufficient
+  evidence and stale results instead of a number
+  (`docs/DESIGN-twin-measurement-integrity.md`, `docs/MEASUREMENT_REVIEW.md`).
+- **Truthful goal and mission launches (PR #23).** The panel had accepted
+  malformed goal limits and caller-authored shell graders, called a saved
+  mission "started", lost mission context on navigation and advertised
+  unsupported quality percentages. Contract and CLI callers now share one
+  boundary — empty goals, malformed or traversal IDs, unsafe swarm-group
+  names, invalid slugs and non-positive cycles are refused before anything
+  is written — and mission save and execution are separate, with shareable
+  Back/Forward routes.
+- **Bounded computer use (PRs #24–#27).** Task-owned browser sessions with
+  durable, lineage-bound action state; host-owned bounded clicks bound to
+  sealed observations; and the CU-1 contract — a dispatched action becomes
+  VERIFIED only through independently bound deterministic postconditions,
+  with output identity compared by filesystem object rather than path
+  string. This is bounded development qualification, not general
+  computer-use acceptance (`computerbench.py` cannot self-certify).
+
 ## v13 — the clean window: only marked data enters (2026-09-03)
 
 Phase 11 (docs/DESIGN-P11-clean-window.md). An audit of the context
