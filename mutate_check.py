@@ -856,6 +856,19 @@ MUTATIONS = [
      '''                learner_cycles = d.get("cycles") or 6''',
      "test_ui.py", "invalid learner launch created an expert before refusing"),
 
+    ("capture: direct tick ignores consent", "twincapture.py",
+     '    consented = twin.need_scope(root, "predict")',
+     '    consented = {}  # deliberately bypass capture consent',
+     "test_twin_depth.py", "capture continues without active consent"),
+    ("capture: another human enters owner stream", "twincapture.py",
+     '        if not owner or actor != owner or actor.startswith("agent:"):',
+     '        if not actor or actor.startswith("agent:"):',
+     "test_twin_depth.py", "panel capture must exclude other human actors"),
+    ("measurement: depth inputs absent from receipt", "twinmeasurement.py",
+     '            "questions": twin.questions(root), "events": twin.C.events(root)}',
+     '            "questions": [], "events": []}',
+     "test_twin_measurement.py", "changed depth inputs must stale or refuse the report"),
+
     ("review: ambiguous option IDs accepted", "twinmeasurement.py",
      '            raise ValueError("duplicate option ID after normalization")',
      '            pass',
@@ -962,10 +975,26 @@ MUTATIONS = [
      "a prediction about the owner with no consent on record"),
 
     ("twin: the label dropped from the clone's output", "twin.py",
-     '''    return {"label": LABEL, "kernel_version": v["v"], "kernel_hash": v["hash"],''',
-     '''    return {"label": "", "kernel_version": v["v"], "kernel_hash": v["hash"],''',
+     '''    out = {"label": LABEL, "kernel_version": v["v"], "kernel_hash": v["hash"],''',
+     '''    out = {"label": "", "kernel_version": v["v"], "kernel_hash": v["hash"],''',
      "test_twin.py",
      "a clone output that does not say it is a model of the owner"),
+
+    # ---- Phase 10.1 (docs/DESIGN-P10.1): two more laws
+    ("twin: a command carrying a key is stored in the clear", "twincapture.py",
+     '''    if any(shaped(t.strip("\\"'")) or shaped(t.split("=", 1)[-1].strip("\\"'"))
+           for t in toks):
+        return "[redacted command]"''',
+     '''    if False:
+        return "[redacted command]"''',
+     "test_twin_depth.py",
+     "a shell command with a credential written into the work stream"),
+
+    ("twin: a tampered signature verifies", "twin.py",
+     '''    ok = hmac.compare_digest(want, str(obj["signature"]))''',
+     '''    ok = True''',
+     "test_twin_depth.py",
+     "an edited twin output that still verifies as signed"),
 
     ("twin: act runs without a definition of done", "twin.py",
      '''    if not done_check:

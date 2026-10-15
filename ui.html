@@ -3315,7 +3315,28 @@ async function loadTwin(){
       <button class="btn sm ghost" onclick="twinAct({action:'learn'})">learn</button>
       <button class="btn sm ghost" onclick="twinAct({action:'fidelity'})">re-run benchmark</button>
     </div><pre class="out" id="twOut" style="margin-top:6px;display:none"></pre></details>`;
+  /* Phase 10.1: the cold start (interview + vignettes), what they are
+     pursuing, how they work, and the autobiography. */
+  const ob = t.objectives || {};
+  const pursuing = (ob.missions||[]).map(m=>`mission ${esc(m.id)}: ${esc(m.objective)}`)
+    .concat((ob.goals||[]).map(g=>`goal ${esc(g.id)}: ${esc(g.goal)}`)).slice(0,4);
+  const teach = `<details ${(t.vignettes_answered||0)<8?"open":""} style="margin:8px 0"><summary class="muted" style="cursor:pointer;font-size:12.5px">
+      teach it — interview ${(t.interview||{}).answered||0}/${(t.interview||{}).of||14} answered · vignettes ${t.vignettes_answered||0}/24 answered</summary>
+    ${(t.interview_bank||[]).map(q=>`<div style="margin:6px 0"><div>${esc(q.question)}</div>
+      <div class="row" style="gap:6px"><input id="iv-${esc(q.id)}" placeholder="in your own words" style="min-width:320px">
+      <button class="btn sm" onclick="twinAct({action:'interview',id:'${esc(q.id)}',text:document.getElementById('iv-${esc(q.id)}').value})">answer</button></div></div>`).join("")}
+    ${(t.vignettes_next||[]).map(v=>`<div style="margin:6px 0"><div>${esc(v.text)}</div>
+      <div class="row" style="gap:6px">${(v.options||[]).map(o=>`<button class="btn sm ghost" onclick="twinAct({action:'vignette',id:'${esc(v.id)}',choice:'${esc(o)}',why:document.getElementById('vw-${esc(v.id)}').value||null})">${esc(o)}</button>`).join("")}
+      <input id="vw-${esc(v.id)}" placeholder="why (optional)" style="min-width:220px"></div></div>`).join("")}
+    ${!(t.interview_bank||[]).length && !(t.vignettes_next||[]).length ? `<span class="muted">interview and vignettes complete — re-answer later from the CLI to measure your own consistency</span>` : ""}
+  </details>`;
+  const rt = t.routines || {};
+  const work = (rt.acts ? `<div class="muted" style="font-size:12px;margin:4px 0">work stream: ${rt.acts} acts, ${rt.distinct} distinct${(rt.habits||[]).slice(0,3).map(h=>` · after <span class="mono">${esc(h.after)}</span> → <span class="mono">${esc(h.then)}</span> ${h.support}/${h.of}`).join("")}</div>` : "");
+  const hist = t.history || {};
+  const auto = (hist.versions||[]).length ? `<div class="muted" style="font-size:12px;margin:4px 0">autobiography: ${(hist.versions||[]).map(v=>`v${v.v} ${esc(v.note||"")} (${esc((v.at||"").slice(0,10))})`).join(" → ")}${(hist.drifts||[]).length?` · drifts: ${(hist.drifts||[]).map(d=>esc(d.status)).join(", ")}`:""}</div>` : "";
   el.innerHTML = `${consentRow}${kernelRow}${fidRow}${drift}${qs}
+    ${pursuing.length?`<div class="muted" style="font-size:12px;margin:4px 0">pursuing now: ${pursuing.join(" · ")}</div>`:""}
+    ${work}${auto}${scope?teach:""}
     <div class="muted" style="font-size:12px;margin:4px 0">${ep.decisions||0} decisions · ${ep.text_only||0} texts · ${ep.with_why||0} with a why · shadow: ${pr.sealed||0} sealed, ${pr.resolved||0} scored${pr.tamper?`, <b>${pr.tamper} TAMPER</b>`:""}</div>
     ${shadow?`<div class="tablewrap"><table><thead><tr><th>decision point</th><th>shadow prediction</th><th>when</th></tr></thead><tbody>${shadow}</tbody></table></div>`:""}
     ${t.block?`<pre class="out" style="margin-top:8px">${esc(t.block)}</pre>`:""}
