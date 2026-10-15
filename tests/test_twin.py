@@ -75,7 +75,7 @@ def _settings(root, super_script=None):
     s = ['[agent]', 'sandbox = "host"', 'allow_unsafe_host = true',
          'poll_interval_seconds = 1', 'max_task_usd = 0', 'reflect_after = []',
          'max_done_rejects = 2', 'max_task_retries = 0', '',
-         '[agent.twin]', 'role = "r_m"', '',
+         '[agent.twin]', 'role = "r_m"', 'lenses = 1', '',
          '[providers.m]', 'type = "mock"', 'script = "scripts/m.json"', '',
          '[roles.default]', 'provider = "m"', 'model = "mock"', '',
          '[roles.r_m]', 'provider = "m"', 'model = "mock"', '',

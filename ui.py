@@ -1721,6 +1721,22 @@ class Handler(BaseHTTPRequestHandler):
                                            "sealed", "actual")}
                     for p in twin.predictions(root)[-30:]]
                 st["block"] = twin.render(root)
+                # Phase 10.1: objectives, the work stream, the cold start
+                try:
+                    import twinaugment
+                    import twincapture
+                    st["objectives"] = twin.objectives(root)
+                    st["routines"] = twincapture.routines(twincapture.events(root))
+                    k = twin.load_kernel(root)
+                    st["interview_bank"] = [q for q in twinaugment.interview_bank(k)
+                                            if not q.get("answer")][:3]
+                    vs = twinaugment.vignette_status(
+                        twinaugment.generate(twin._cfg(root), 24), twin.episodes(root))
+                    st["vignettes_next"] = [v for v in vs if not v["answered"]][:3]
+                    st["vignettes_answered"] = sum(1 for v in vs if v["answered"])
+                    st["history"] = twin.history(root)
+                except Exception as e:
+                    st["depth_error"] = str(e)[:200]
                 self._json(st)
             elif (m := re.fullmatch(r"/api/experts/([a-z0-9-]+)/self", path)):
                 # the agent's own factual self-model, exactly as it is
@@ -2235,6 +2251,38 @@ class Handler(BaseHTTPRequestHandler):
                                              d.get("situation") or {},
                                              d.get("options") or [],
                                              d.get("counterpart"))
+                    elif action == "interview":
+                        import twinaugment
+                        twin.need_scope(root, "predict")
+                        k = twin.load_kernel(root)
+                        try:
+                            rec = twinaugment.interview_answer(
+                                k, d.get("id") or "", d.get("text") or "", who)
+                        except ValueError as e:
+                            self._fail({"error": str(e)}, 400)
+                            return
+                        twin.save_kernel(root, k)
+                        out = {"answered": d.get("id"), "at": rec["at"]}
+                    elif action == "vignette":
+                        import twinaugment
+                        vs = twinaugment.generate(twin._cfg(root), 24)
+                        v = next((x for x in vs if x["id"] == d.get("id")), None)
+                        if not v:
+                            self._fail({"error": "unknown vignette"}, 400)
+                            return
+                        out = twin.vignette_answer(root, v, d.get("choice"),
+                                                   d.get("why"), who)
+                    elif action == "outcome":
+                        out = twin.record_outcome(root, d.get("id") or "",
+                                                  d.get("outcome") or "",
+                                                  d.get("note") or "", who)
+                    elif action == "consider":
+                        out = twin.consider(root, d.get("situation") or {},
+                                            d.get("counterpart"))
+                    elif action == "sensitivity":
+                        out = twin.sensitivity(root, d.get("situation") or {},
+                                               d.get("options") or [],
+                                               d.get("counterpart"))
                     else:
                         self._fail({"error": f"unknown twin action {action!r}"}, 400)
                         return

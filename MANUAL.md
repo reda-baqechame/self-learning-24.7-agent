@@ -235,6 +235,7 @@ dialogs, 40 px targets.
 | `python twin.py observe\|import\|harvest\|learn\|predict\|fidelity\|render\|status` | the twin: record a decision, fit the kernel, ask "what would I do?", run the benchmark, see the OWNER block every window reads (docs/DESIGN-P10) |
 | `python twin.py shadow [--reveal ID]\|questions\|answer ID --text\|drift status\|confirm\|dismiss` | shadow predictions (sealed before you decide, hidden until you do), the one open "why", and drift — a notice with numbers that only you turn into a new kernel version |
 | `python twin.py superself\|draft\|act --done-check CMD` | the Super-Self (needs `[agent.twin] role`): where a better-informed you diverges, as a question; a draft in your voice, never sent; a gated task on your behalf, never executed by the twin |
+| `python twin.py interview\|vignettes\|outcome\|consider\|sensitivity\|objectives\|history\|verify\|capture\|routines` | twin depth (docs/DESIGN-P10.1): the cold-start interview and vignettes, outcomes, the alternatives you weigh, the sensitivity simulation, what you are pursuing, the autobiography, signature verification, the work stream and your routines |
 | `python checkpoint.py --root <expert>` | resumable long jobs and their progress |
 | `python sandbox.py [--run CMD]` | which execution backend is active, and try it |
 | `python variants.py spawn\|trial\|list` | charter evolution, gated by evidence (promote/rollback from the panel) |
@@ -306,7 +307,8 @@ experts/<slug>/
   twin/                  the OWNER's twin (CONTROL): episodes.jsonl, kernel.json
                          (versioned fits), predictions.jsonl + shadow/ (sealed
                          before you decide), questions.jsonl, drift.json,
-                         fidelity.json, authority.json (consent projection)
+                         fidelity.json, authority.json (consent projection),
+                         events.jsonl + capture-state.json (the work stream)
   logs/agent.log         one JSON line per step and event
   logs/model-outcomes.jsonl   the evidence capability routing uses
   logs/health.json       the harness health ritual at loop start
@@ -647,6 +649,29 @@ never edited by the model) < `draft` (text in your voice, labeled, never
 sent) < `act` (queues a *gated* task on your behalf; the twin executes
 nothing, and a task without `--done-check` is refused). `revoke` returns
 everything to refusal.
+
+**Teach it on day one, and let it watch you work** (docs/DESIGN-P10.1):
+
+```bash
+python twin.py interview --root experts/<slug>                 # fourteen questions
+python twin.py interview --root experts/<slug> --answer risk "I take reputational risk, never solvency risk."
+python twin.py vignettes --root experts/<slug>                 # 24 decision situations
+python twin.py vignettes --root experts/<slug> --answer vg-… deny --why "margin too thin"
+python twin.py outcome <episode> good --root experts/<slug>    # what a decision led to
+python twin.py history --root experts/<slug>                   # who you have been, per the record
+```
+
+Answer the same vignette again a month later and the twin measures your
+own consistency — the ceiling it scores itself against. To let it watch
+how you work, name the sources in `settings.toml` (naming them is the
+consent): `capture_history` (your shell history file, stored redacted)
+and `capture_dirs` (directories whose edits become events: paths and line
+counts, never content). `python twin.py routines` then shows your habits
+("after `git commit` you usually `git push`"), and workflow fidelity
+joins the benchmark. The Super-Self runs one metered call per `lenses`
+entry and a 400-sample sensitivity simulation of your own policy; put
+`TWIN_SIGNING_KEY=<secret>` in `agent.env` and every twin output is
+HMAC-signed (`python twin.py verify out.json`).
 
 ## 14. The design gate
 

@@ -204,6 +204,28 @@ class Measurement(unittest.TestCase):
         self.assertIsNone(TM.current_report(self.root))
         print("[snapshot-race] an intervening writing update refuses archival instead of binding old diagnostics to new inputs")
 
+    def test_depth_inputs_invalidate_receipts(self):
+        self.seed()
+        for name in ("questions", "events"):
+            twin.fidelity(self.root)
+            self.assertNotEqual(TM.current_report(self.root)["verdict"], "STALE")
+            target = twin if name == "questions" else twin.C
+            with patch.object(target, name, return_value=[{"id": "changed-input"}]):
+                self.assertEqual(TM.current_report(self.root)["verdict"], "STALE")
+        print("[depth-binding] changed question or work-stream records invalidate displayed fidelity")
+
+    def test_depth_input_change_during_scoring_refuses(self):
+        self.seed()
+        original = twin.C.workflow_fidelity
+        def interleaved(evs, **kwargs):
+            result = original(evs, **kwargs)
+            twin.C._record(self.root, set(), "panel", "fixture change", "race")
+            return result
+        with patch.object(twin.C, "workflow_fidelity", side_effect=interleaved):
+            with self.assertRaisesRegex(twin.Refused, "changed during evaluation"):
+                twin.fidelity(self.root)
+        print("[depth-race] a work-stream write during evaluation refuses archival")
+
     def test_novel_losses_do_not_freeze_cold_start(self):
         for i, loss in enumerate([0.1, 0.1, 9.0, 9.0]):
             twin._drift_update(self.root, loss, {"episode": str(i), "novelty": 1.0})

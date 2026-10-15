@@ -9,7 +9,7 @@ by a command, and every claim about what is *proven* is bounded in §17.
 |---|---|
 | Product | **Expert Fleet** — a platform for building expert AI agents that work continuously, prove what they did, and remember what they learned |
 | Second product, same tree | **Screen Tutor** — a native companion that watches a screen and teaches; partially built, see §16 |
-| Code | 124 Python modules, 56.7k lines, **Python standard library only** — no framework, no database, no build step |
+| Code | 126 Python modules, 56.7k lines, **Python standard library only** — no framework, no database, no build step |
 | Tests | 161 registered acceptance scripts · 225 registered mutations · 6 CI jobs (Ubuntu + Windows × Python 3.11/3.12/3.13) |
 | Interfaces | one HTML control panel (49 HTTP endpoints) · 186 CLI subcommands across 42 modules |
 | State | plain files on disk that the owner owns. No hosted component, nothing phones home |
@@ -42,7 +42,7 @@ stages, and a handover has to name them separately.
 
 | | Expert Fleet | Screen Tutor |
 |---|---|---|
-| Where | the repository root — the 124 modules in §15 | `companion/` (native .NET), `learning_contracts.py`, `teaching_packs/`, `tests/test_tutor_*.py`, `planning/screen-tutor-execution/` |
+| Where | the repository root — the 126 modules in §15 | `companion/` (native .NET), `learning_contracts.py`, `teaching_packs/`, `tests/test_tutor_*.py`, `planning/screen-tutor-execution/` |
 | Release state | committed, remote `main`, 6 CI jobs green on the audited baseline | **uncommitted work on a branch** (`codex/screen-tutor-build`), never in CI |
 | Completeness | the machinery is built and tested; the gaps are qualification and polish | 5 of 38 work packages accepted, 13 partial, 20 not started |
 | What a buyer can run today | everything in §4–§14 | foundations and contracts, not the visible lesson |
@@ -176,7 +176,7 @@ and a watchdog with a safe mode beneath all of it.
 
 One mandatory gateway per kind of power. `python execution.py --audit`
 scans the whole tree and fails the build if any module bypasses one —
-**0 violations across 124 modules, 19 declared platform-internal** (run
+**0 violations across 126 modules, 19 declared platform-internal** (run
 today).
 
 | Authority | Module | What it owns |
@@ -360,7 +360,7 @@ or expert data).
 
 ## 15. Every module, and what it is for
 
-124 modules, grouped by the job they do. The sentence is each module's own
+126 modules, grouped by the job they do. The sentence is each module's own
 first docstring line.
 
 ### The engine
@@ -443,9 +443,11 @@ first docstring line.
 | `experience.py` | 350 | what a sibling already paid to learn |
 | `premise.py` | 190 | refuse to build on something known false |
 | `selfmodel.py` | 333 | facts about itself, not a persona |
-| `twin.py` | 1534 | a Self Kernel of the OWNER, beneath every agent |
+| `twin.py` | 1994 | a Self Kernel of the OWNER, beneath every agent |
 | `twinmath.py` | 626 | every number the Self Kernel reports |
-| `twinmeasurement.py` | 178 | retrospective evaluation artifacts |
+| `twinmeasurement.py` | 184 | retrospective evaluation artifacts |
+| `twincapture.py` | 434 | the owner's consented work stream (candidate, unaccepted) |
+| `twinaugment.py` | 273 | interview, vignettes, lenses, sensitivity simulation (candidate, unaccepted) |
 | `sources.py` | 1071 | every claim knows where it came from |
 | `conflicts.py` | 528 | what to believe when the material disagrees |
 | `standards.py` | 277 | the bar, extracted and made checkable |

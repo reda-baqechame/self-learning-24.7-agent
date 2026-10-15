@@ -136,7 +136,7 @@ SYSTEMS = {
         "what": "courses and atoms, skills graph, commons, failures, gotchas, "
                 "premise, competence, recall, sources, conflicts, standards, "
                 "self-model, the owner's twin",
-        "tests": ["test_knowledge.py", "test_twin.py", "test_twin_measurement.py",
+        "tests": ["test_knowledge.py", "test_twin.py", "test_twin_measurement.py", "test_twin_depth.py",
                   "test_memory.py", "test_memcheck.py", "test_skills.py",
                   "test_skillgraph.py", "test_skillmd.py", "test_recall.py",
                   "test_associative.py", "test_memory_kinds.py",

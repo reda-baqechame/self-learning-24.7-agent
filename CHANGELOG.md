@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased — the deeper Twin (Phase 10.1), reconciled onto `main`, NOT accepted
+
+The Phase 10.1 candidate (`codex/twin-depth-reconciliation`: work-stream
+capture, consent at the capture entry point, interview and vignette cold
+start, lenses and sensitivity simulation, the remaining fidelity metrics,
+HMAC signatures) merged onto the v15 `main` so it can be reviewed and run
+under CI. Both sides kept: v15's handover registrations and mutations and
+the Twin's `test_twin_depth.py`, `twincapture.py`, `twinaugment.py` and five
+mutations. Counts recomputed from the tree: 126 modules, 162 registered
+tests, 230 mutations.
+
+This is **not** an accepted phase. The candidate's own gates
+(`docs/DESIGN-twin-depth-reconciliation.md`) remain open for capture task
+authority, link/credential containment and bounded reads, recovery under
+concurrent ticks, historical snapshots (`predict(at=)` filters citations,
+not trained state), prospective enrolment, and lens provenance / signing
+authority. No personal capture is enabled; every capture test uses
+fixtures.
+
 ## v15 — the handover pass: the claims a buyer reads, made true (2026-10-14)
 
 A verification pass over the whole project ahead of a handover
@@ -81,6 +100,42 @@ Three lines of work merged in September, recorded here after the fact
   with output identity compared by filesystem object rather than path
   string. This is bounded development qualification, not general
   computer-use acceptance (`computerbench.py` cannot self-certify).
+
+Reconciliation note (2026-09-05): the v12.1 section below preserves Claude's
+candidate history, not a released or accepted phase. Historical reconstruction,
+prospective fidelity and safe general capture remain open integration gates.
+
+## v12.1 — twin depth: capture, cold start, augmentation, the rest of the benchmark (2026-09-03)
+
+Phase 10.1 (docs/DESIGN-P10.1-twin-depth.md, committed before the code).
+An honest audit of v12 against the owner's brief found what was designed
+but not read, and what was one call where the brief asked for an engine.
+Nothing from v12 is removed or renamed.
+
+- `twincapture.py` — the work stream (Layer 1, as far as consent and a
+  stdlib reach): panel actions from `org/audit.jsonl`, a named shell
+  history (redacted; a key-shaped token turns the line into
+  `[redacted command]`), named directories (paths and line counts, never
+  content) → `twin/events.jsonl`; routines (next-act table, chains);
+  workflow fidelity vs the majority baseline; an unnamed source captures
+  nothing, proven.
+- `twinaugment.py` — the cold start (a fourteen-question interview in the
+  owner's words; 24 deterministic vignettes from a feature schema, each
+  answer an episode, a re-answer a retest) and the augmentation engine
+  (lenses: one metered call per analyst lens, aggregated by vote with
+  evidence and disputed assumptions; a 400-sample sensitivity simulation
+  of the Clone with flip points); `consider()`.
+- `twin.py` — objectives (missions, goals, armed intentions) and a belief
+  state (`predict --at`: only earlier episodes cited, what was knowable
+  reported); the owner's own stated reasons per choice, cited by the
+  Clone; attention, preference, temporal, outcome and workflow fidelity;
+  `outcome` amendments; `history()` (the autobiography); HMAC signatures
+  on every output under `TWIN_SIGNING_KEY` and `verify`.
+- Panel: the Twin card gained the interview, the next vignettes, what the
+  owner is pursuing, the work-stream habits and the autobiography.
+- Registration: doctor, leakage enumeration (events, capture state), two
+  more mutation checks (redaction, signature), `tests/test_twin_depth.py`
+  (9 preregistered checks); prose 119 modules / 155 tests / 38 mutations.
 
 ## v13 — the clean window: only marked data enters (2026-09-03)
 

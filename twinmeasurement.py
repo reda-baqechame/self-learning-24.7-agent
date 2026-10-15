@@ -57,16 +57,24 @@ def fitted_digest(version):
 def runtime():
     import twin
     import twinmath
-    paths = (twin.__file__, twinmath.__file__, __file__)
+    paths = (twin.__file__, twinmath.__file__, twin.C.__file__, twin.A.__file__, __file__)
     sources = {}
     for path in paths:
         with open(path, "rb") as stream:
             sources[os.path.basename(path)] = hashlib.sha256(
                 stream.read().replace(b"\r\n", b"\n")).hexdigest()
     return {"sources": sources, "python": platform.python_version(),
+            "workflow_holdout_share": twin.C.HOLDOUT_SHARE,
             "constants": {name: getattr(twin, name) for name in
                           ("RULE_BONUS", "NEIGHBOR_BONUS", "NEIGHBORS",
                            "MIN_NEIGHBOR_SIM", "MIN_HOLDOUT", "NOVEL")}}
+
+
+def auxiliary_snapshot(root, episodes_from=None):
+    import twin
+    return {"episodes": twin.episodes(root) if episodes_from is None else episodes_from,
+            "predictions": twin.predictions(root),
+            "questions": twin.questions(root), "events": twin.C.events(root)}
 
 
 def binding(kernel, dataset):
@@ -93,8 +101,7 @@ def archive(root, kernel, dataset, scored, report, auxiliary, evaluation_runtime
     # Bind the captured inputs, never newly read state to already computed scores.
     # Changes after this check still make current_report stale against this snapshot.
     if (kernel != twin.load_kernel(root) or evaluation_runtime != runtime() or
-            auxiliary != {"episodes": twin.episodes(root),
-                          "predictions": twin.predictions(root)}):
+            auxiliary != auxiliary_snapshot(root)):
         raise twin.Refused("inputs changed during evaluation; rerun fidelity")
     current_binding = {"kernel": digest(kernel), "dataset": digest(dataset),
                        "runtime": digest(evaluation_runtime)}
@@ -167,8 +174,7 @@ def current_report(root):
                              test_groups_reused=receipt["test_groups_reused"],
                              generalization_established=False)
         expected = binding(kernel, dataset)
-        expected["auxiliary"] = digest({"episodes": twin.episodes(root),
-                                       "predictions": twin.predictions(root)})
+        expected["auxiliary"] = digest(auxiliary_snapshot(root))
         if report != authoritative or report["binding"] != expected:
             raise ValueError("evaluation binding mismatch")
         return report
