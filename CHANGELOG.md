@@ -19,6 +19,11 @@ not trained state), prospective enrolment, and lens provenance / signing
 authority. No personal capture is enabled; every capture test uses
 fixtures.
 
+Evidence (Windows 11 / Python 3.12.13, short `AGENT_TEST_TMP`): 162
+executed — 157 passed, 5 skipped, 0 failed; the 17 Twin mutations 17
+caught, 0 missed; `execution.py --audit` 0 violations across 126 modules;
+`harness.py --check` 0 contract problems.
+
 ## v15 — the handover pass: the claims a buyer reads, made true (2026-10-14)
 
 A verification pass over the whole project ahead of a handover
