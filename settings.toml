@@ -83,6 +83,21 @@ http_write = []                     # endpoint NAMES (from the table below) a
 #
 # [agent.twin]
 # role = "consultant"          # the role the Super-Self and drafts think with
+# lenses = ["finance", "risk", "relationships"]   # one metered call per lens
+#                              # (docs/DESIGN-P10.1); an integer picks that
+#                              # many of the defaults; 1 = a single call
+# capture_history = "~/.bash_history"   # a shell history file to read as the
+#                              # owner's command stream (redacted; naming it
+#                              # is the consent). PowerShell:
+#                              # "$APPDATA/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt"
+# capture_dirs = ["C:/Users/me/projects"]   # directories whose edits become
+#                              # events (paths and line counts, never content)
+# capture_max_files = 5000
+# features = ["risk", "margin"]           # the vignette schema; or tables
+#                              # [{name, low, high, log, text}]; default: six
+#                              # business features
+# vignette_options = ["grant", "deny"]
+# Sign every twin output: put TWIN_SIGNING_KEY=<random secret> in agent.env.
 inbox_settle_seconds = 10           # ignore files still being copied in
 max_task_retries = 3                # retries of a failed task before it rests
 candidates_max = 5                  # test-time compute: attempts to score

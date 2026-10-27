@@ -93,6 +93,8 @@ IN_ROOT = [
     ("twin/episodes.jsonl", "the owner's decision episodes"),
     ("twin/predictions.jsonl", "the sealed shadow-prediction ledger"),
     ("twin/authority.json", "the twin consent projection"),
+    ("twin/events.jsonl", "the owner's work stream (docs/DESIGN-P10.1)"),
+    ("twin/capture-state.json", "the work-stream capture offsets and manifests"),
 ]
 
 

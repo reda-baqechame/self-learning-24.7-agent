@@ -2,7 +2,7 @@
 
 **What this is.** A file-backed, stdlib-only platform for building expert AI
 agents that work continuously, prove what they did, and remember what they
-learned. 124 Python modules, 161 registered acceptance tests, one HTML control panel, no
+learned. 126 Python modules, 162 registered acceptance tests, one HTML control panel, no
 database, no framework, no build step. Python 3.11+ and your own API keys.
 
 **Who this document is for.** Somebody who has just been handed the
@@ -205,7 +205,7 @@ patches — it is **five gateways every caller must pass through**:
 **These are enforced, not documented.** `python execution.py --audit` scans
 every module in the tree for a raw `subprocess` call outside the authority
 and reports violations; `tests/test_invariants.py` fails the suite if there
-are any. Today: **0 violations across 124 modules**, with 19 modules declared
+are any. Today: **0 violations across 126 modules**, with 19 modules declared
 platform-internal, each carrying a written reason.
 
 ### 3.6 The Memory Institution — what outlives every model
@@ -660,10 +660,10 @@ last one is the only one produced on a computer this project does not own.
 
 ### 10.1 The suite passes — the weakest claim
 
-161 registered acceptance tests, configured for Windows and Linux under
+162 registered acceptance tests, configured for Windows and Linux under
 Python 3.11, 3.12 and 3.13. Actual passes and skips require a run receipt. Each test prints a sentence describing what it
-observed, and those sentences are the report — `EVIDENCE.md` quotes them
-verbatim rather than summarising.
+observed, and those sentences are the report — `EVIDENCE.md` preserves them
+with disclosed user-home-path redaction rather than summarising.
 
 This is the weakest claim because **a passing test proves nothing on its
 own** — a point §10.5 makes concrete, where a suite that had been green twice
@@ -681,7 +681,7 @@ walks the tree:
 
 | Check | Enumerates |
 |---|---|
-| execution paths | every subprocess call site in 124 modules |
+| execution paths | every subprocess call site in 126 modules |
 | execution catalogue | every declared operation against what it declares |
 | filesystem zones | every declared control file and directory |
 | traversal spellings | 12 escape forms |
@@ -886,7 +886,7 @@ packs — the exam the student cannot touch) `mastery.py` (pretest → study →
 practice → sealed exam → diagnose → verdict → distill → retest)
 
 **Memory** — `memory.py` `skills.py` `commons.py` `recall.py` `gotchas.py`
-`premise.py` `memrouter.py` `cases.py` `selfmodel.py` `twin.py` `twinmath.py`
+`premise.py` `memrouter.py` `cases.py` `selfmodel.py` `twin.py` `twinmath.py` `twincapture.py` `twinaugment.py`
 
 **Knowing what it knows** — `sources.py` `conflicts.py` `standards.py`
 `curriculum.py` `ingest.py` `verify.py` `memcheck.py` `citecheck.py`
@@ -959,7 +959,7 @@ python loop.py run --drain --root experts/<slug>    # work the queue
 
 ```bash
 python demo.py            # the whole platform, keyless, in one run
-python tests/run_all.py   # 161 registered acceptance tests
+python tests/run_all.py   # 162 registered acceptance tests
 python proof.py           # what is proven, and to what level
 python evidence.py        # why we believe it, and where belief runs out
 python metrics.py         # is it working — and the numbers we refuse to invent

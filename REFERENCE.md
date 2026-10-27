@@ -7,8 +7,8 @@ logic it runs, how you interact with it, and what it does **not** do.
 written by reading the code, not from memory; where a claim could rot, the
 test that keeps it honest is named.
 
-**Scale, so you know what you are reading about:** 124 Python modules,
-one HTML file for the whole UI, 161 registered acceptance tests, zero third-party
+**Scale, so you know what you are reading about:** 126 Python modules,
+one HTML file for the whole UI, 162 registered acceptance tests, zero third-party
 dependencies. Python 3.11+ and your own API keys.
 
 ---
@@ -61,7 +61,7 @@ Six systems, and the modules that implement each:
 | 1 | **Harness & loop** | `loop.py` `harness.py` `policy.py` `effects.py` `locks.py` `checkpoint.py` `sandbox.py` `context.py` |
 | 2 | **Fleet & creation lanes** | `fleet.py` `quick.py` `templates.py` `team.py` |
 | 3 | **Work systems** | `goal.py` `workflows.py` `consult.py` `prospective.py` `routines.py` `research.py` |
-| 4 | **Memory institution** | `memory.py` `skills.py` `commons.py` `recall.py` `gotchas.py` `premise.py` `memrouter.py` `sources.py` `conflicts.py` `standards.py` `selfmodel.py` `curriculum.py` `cases.py` `twin.py` `twinmath.py` |
+| 4 | **Memory institution** | `memory.py` `skills.py` `commons.py` `recall.py` `gotchas.py` `premise.py` `memrouter.py` `sources.py` `conflicts.py` `standards.py` `selfmodel.py` `curriculum.py` `cases.py` `twin.py` `twinmath.py` `twincapture.py` `twinaugment.py` |
 | 5 | **Improvement & governance** | `variants.py` `approvals.py` `replay.py` `benchmark.py` `verify.py` `citecheck.py` `memcheck.py` `designcheck.py` `candidates.py` `evidence.py` `confidence.py` |
 | 6 | **Control plane & interop** | `ui.py` `ui.html` `chief.py` `doctor.py` `bootstrap.py` `preflight.py` `backup.py` `providers.py` `toolbox.py` `mcp.py` `federation.py` `trace.py` `uicards.py` `modelrouter.py` |
 
@@ -681,6 +681,33 @@ python twin.py drift status|confirm|dismiss · superself · draft · act --done-
 ```
 
 (`test_twin.py`, 13 preregistered checks.)
+
+**Depth candidate, not accepted (docs/DESIGN-P10.1-twin-depth.md; `twincapture.py`,
+`twinaugment.py`; `test_twin_depth.py`, 9 checks).** The work stream —
+Layer 1 as far as consent and a stdlib reach: the owner's panel actions
+(from `org/audit.jsonl`), a shell history file the owner names
+(`capture_history`, redacted: a key-shaped token turns the line into
+`[redacted command]`), and directories the owner names (`capture_dirs`:
+path, lines added/removed, byte delta, seconds since the last edit —
+never content) → `twin/events.jsonl`; routines mined as a next-act table
+and frequent chains; **workflow fidelity** = held-out next-act accuracy
+vs. the majority baseline. The cold start: a fourteen-question
+**interview** in the owner's words and 24 deterministic **vignettes**
+from a feature schema (`features`, `vignette_options`), each answer an
+episode, a re-answer a retest. **Objectives** (missions, goals, armed
+intentions) and a **belief state** (`predict --at`: only earlier
+episodes are cited; this does not reconstruct historical trained state) join the kernel. The
+Super-Self became an engine: **lenses** (`lenses`, one metered call per
+analyst lens, aggregated by vote with evidence and disputed assumptions)
+plus a mechanical **sensitivity simulation** (the Clone over 400
+perturbed situations: decision stability and flip points). The benchmark
+gained attention, preference, temporal (the era's version must win after
+a confirmed drift), outcome (`twin.py outcome EP good|bad`) and workflow
+fidelity, each a number or *not measured*. Every output is HMAC-signed
+when `TWIN_SIGNING_KEY` is set (`twin.py verify FILE`); `consider()` lists
+the options the owner weighed in similar situations; `history()` is the
+autobiography; the kernel keeps the owner's own stated reasons per choice
+and the Clone cites them.
 
 **Measurement repair** (`twinmeasurement.py`,
 `docs/DESIGN-twin-measurement-integrity.md`, `test_twin_measurement.py`).
@@ -1510,6 +1537,7 @@ beside the expert, then at the fleet home, then beside the code:
 | `python standards.py --course C [--extract\|--add TEXT]` | the bar |
 | `python selfmodel.py --root <e> [--role R]` | the self-model |
 | `python twin.py status\|consent\|observe\|learn\|predict\|fidelity\|shadow\|questions\|answer\|drift\|render\|superself\|draft\|act` | the owner's twin: consent, episodes, the kernel, shadow scoring, the benchmark, drift, the Super-Self (docs/DESIGN-P10) |
+| `python twin.py interview\|vignettes\|outcome\|consider\|sensitivity\|objectives\|history\|verify\|capture\|routines` | twin depth: the cold start, outcomes, alternatives, the simulation, objectives, the autobiography, signatures, the work stream (docs/DESIGN-P10.1) |
 | `python designcheck.py <file\|dir> [--course C] [--strict]` | the design gate |
 | `python gotchas.py [--goal G]` | what it already burned itself on |
 | `python premise.py "goal" --root <e>` | does memory contradict this task? |
@@ -1687,7 +1715,7 @@ through an example; it walks the tree:
 
 | Check | What it enumerates |
 |---|---|
-| execution paths | every subprocess call site in 124 modules |
+| execution paths | every subprocess call site in 126 modules |
 | execution catalogue | every declared operation, against what it declares |
 | filesystem zones | every declared control file and directory |
 | traversal spellings | 12 escape forms (posix, windows, UNC, mixed, nested) |
@@ -1971,7 +1999,7 @@ Eleven are done; the twelfth is by definition what comes next.
 |---|---|---|
 | 1 | version control, known-good baseline | **done** — git, with the remediation split across commits |
 | 2 | no browser-origin/CSRF into mutating APIs; no free-form network-supplied shell gates | **done** — `_same_origin` on every mutating verb (`test_csrf.py`); `gates.py` is a closed catalogue and a raw string is refused |
-| 3 | one canonical Execution Authority; no alternate path may exist | **done** — `execution.py`, and `--audit` scans all 124 modules for a bypass (`test_invariants.py`) |
+| 3 | one canonical Execution Authority; no alternate path may exist | **done** — `execution.py`, and `--audit` scans all 126 modules for a bypass (`test_invariants.py`) |
 | 4 | agent workspace separated from control state; all filesystem ops through File Authority | **done** — `fileauth.py` with four zones, enforced per zone rather than per file |
 | 5 | `file://` and SSRF blocked; redirects/DNS/IP revalidated | **done** — scheme allowlist, blocked networks, and a redirect handler that re-checks (`test_url.py`) |
 | 6 | one Credential Authority; backup/package/health/runtime agree | **done** — `credentials.py`; `test_invariants` asks the same four sources of every subsystem |
